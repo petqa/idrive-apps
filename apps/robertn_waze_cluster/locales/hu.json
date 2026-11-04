@@ -23,6 +23,7 @@
     "Status: {0}": "Állapot: {0}",
     "Connecting…": "Csatlakozás…",
     "Removed after restart": "Újraindítás után eltávolítva",
+    "Removed — head unit kept restarting": "Eltávolítva — a fejegység folyamatosan újraindult",
     "Patched after restart": "Újraindítás után alkalmazva",
     "Removing patch…": "Javítás eltávolítása…",
     "Patching…": "Javítás alkalmazása…",

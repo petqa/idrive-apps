@@ -35,7 +35,7 @@ a video pipeline:
 Install the app `robertn_waze_cluster` from the catalog of
 [idrive-apps](https://github.com/robertnisipeanu/idrive-apps)
 through the [mgu Store](https://github.com/robertnisipeanu/mgu-store). The
-app requires this tool (0.8.2); this tool requires `cluster-render` 0.3.9 and
+app requires this tool (0.8.5); this tool requires `cluster-render` 0.3.10 and
 `mgu-deploy` 0.7.11, the deploy tool version that runs activate and deactivate
 hooks and puts the tool's `recmgr` and `crashNames` names, `aapd` among
 them, on the lists. Requirements resolve across catalog sources.
@@ -50,7 +50,9 @@ and the app says why and offers CarPlay's Patch button, when CarPlay's Remove pa
 the patcher cannot find or recognise one of its edit sites in the binary or
 something else modified it, when the build is outside the proven list and
 CarPlay's Patch button has not patched it, or when `carplay.service` starts another program.
-An update brings an older patch of ours up to date.
+An update brings an older patch of ours up to date. The first install on a
+HIGH F head unit also applies the patch again where 0.8.2's boot recovery
+removed it (PATCH.md "Supported head units").
 
 The same hook then writes the Android Auto patch, on the one proven aapd
 build and only on a car coded `KI_KOMBI_VARIANT` 7, and never stops or
@@ -106,17 +108,29 @@ stays as it is.
 On a fresh install the patched CarPlay first runs at the next head-unit
 start, which also loads the recmgr entry.
 
-**When CarPlay crashes.** A crash (a core dump, or a watchdog timeout) fails
-`carplay.service`, and the head unit restarts as above; neither the recmgr
-entry nor the drop-in prevents it. The recovery service records the crash
-at once, and a boot step that runs before CarPlay counts the crashed start
-and, at the second crash of the patched CarPlay with no crash-free
-head-unit start in between, restores the original binary before CarPlay
-starts, so CarPlay comes back without the map until CarPlay's Patch button. Where
-recmgr loaded the entry and the head unit stays up, the recovery service
-also restores at the second crash and starts CarPlay again, at most three
-times per head-unit start, 5 s, 15 s and 60 s after a crash. Details:
-PATCH.md "Boot recovery".
+**When the patch keeps the head unit from starting.** A CarPlay crash (a
+core dump, or a watchdog timeout) fails `carplay.service`, and the head
+unit restarts as above; neither the recmgr entry nor the drop-in prevents
+it. Another process the patch makes fail restarts it through recmgr. A boot
+step that runs before CarPlay records each start of the patched CarPlay,
+and the recovery service marks it healthy once CarPlay has run 60 s. The
+next boot step counts a start that was not healthy as failed only on
+evidence: a crash of CarPlay, or a restart recmgr or crashhandler
+recorded, whatever process it names. A switch-off after the healthy window,
+a restart asked for or a start CarPlay never ran in counts nothing; a start
+that ended with no record (a power cut, or a shutdown inside the window
+with no restart record) is unknown, and two of those in a row count one,
+the accepted cost of catching a loop whose records are lost. It restores
+the original binary before CarPlay starts after the first failed start for
+a build outside the proven list, and for a proven one after the second
+with no healthy start between, in a second or two, deciding from small
+state files only. CarPlay comes back without the map, its Status row reads
+`Removed — head unit kept restarting`, and its Patch button applies the
+patch again.
+Where recmgr loaded the entry and the head unit stays up, the recovery
+service also restores at the threshold and starts CarPlay again, at most
+three times per head-unit start, 5 s, 15 s and 60 s after a crash.
+Details: PATCH.md "Boot recovery".
 
 To break a loop by hand: keep the phone from connecting (unplug it, or turn
 off its Wi-Fi and Bluetooth) so CarPlay has no session to crash in, then over
@@ -135,9 +149,9 @@ next head-unit start (**Restart head unit**). `aapd.service` has no
 `OnFailure=`, so no drop-in is needed. A crash or a SIGKILL of aapd that
 `patchd` did not send is followed by `systemctl start aapd.service` 5 s, 15
 s and 60 s later, at most three times per head-unit start, where recmgr
-loaded the entry, and aapd has its own boot recovery: the second crash of
-the patched aapd with no crash-free start in between restores the original
-aapd and aapd.conf before aapd starts.
+loaded the entry, and aapd has its own boot recovery: the second failed
+start of the patched aapd with no healthy start between restores the
+original aapd and aapd.conf before aapd starts.
 
 The phone sends a 1280x720 picture with its map in the top 1280x564, the
 map area's shape; the decoder crops that part (`src_crop` in
@@ -523,13 +537,13 @@ over a file of its own build. **Never `systemctl stop` or `restart` aapd.**
 
 ## Safety
 
-- Nothing of ours runs on a head unit whose kernel command line says
-  `hwvariant=HIGHF`, has none, or has two that disagree (PATCH.md
-  "Supported head units"): no patch is written, a patch already on disk
-  is restored at the next boot before carplay or aapd starts, and this
-  tool's capture and the cluster renderer stay idle. The app shows
-  `Status: Not supported on this car` in both sections. Every other
-  variant runs as the owner's HIGH car does.
+- Every head-unit variant runs, HIGH F included (0.8.2 refused it).
+  Nothing of ours runs only where the variant cannot be read: a kernel
+  command line with no `hwvariant=`, or two that disagree (PATCH.md
+  "Supported head units"). There no patch is written, a patch already on
+  disk is restored at the next boot before carplay or aapd starts, and
+  this tool's capture and the cluster renderer stay idle; the app shows
+  `Status: Not supported on this car` in both sections.
 - The patch is the only change to a BMW binary. It is reversible and fully
   backed up, checks every edit site before writing, refuses a build where a
   site is not found or not recognised, is written by atomic rename, and
@@ -549,10 +563,10 @@ over a file of its own build. **Never `systemctl stop` or `restart` aapd.**
   checks `/` is read-only again after every write. It applies no patch and
   restarts nothing on its own. `reboot` is honoured only while a change is
   pending, one at a time, and at most once every 10 minutes.
-- Boot recovery (`recovery.js`, root) changes the binary only through the same
-  revert as CarPlay's Remove patch button or Android Auto's Remove patch button, and only when that revert
-  would change it (`restorable: yes`: a verified backup of the file's own
-  build). Its one action on a service is `systemctl start` of carplay or
+- Boot recovery (`recovery.js`, root) writes back only our backup of the
+  original, verified against the SHA-256 recorded when it was taken, over
+  the backup's own build, and only for a binary its patch record shows as
+  ours or cannot vouch for. Its one action on a service is `systemctl start` of carplay or
   aapd after a crash or a SIGKILL `patchd` did not send, bounded, where
   recmgr loaded the service's entry this boot; it never stops,
   kills or restarts anything. Its shutdown record is a drop-in for

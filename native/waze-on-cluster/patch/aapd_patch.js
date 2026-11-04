@@ -48,6 +48,7 @@ var cp = require('child_process');
 var conf = require('./aapd_conf.js');
 var buildId = require('./carplay_locate.js').buildId;
 var headUnit = require('./head_unit.js');
+var record = require('./patch_record.js');
 
 /* The patchable aapd builds. Each has its own four edits (the code moved
  * between builds): their offsets, stock and patched bytes, and the anchors
@@ -311,6 +312,9 @@ function cmdApply(t, dpi, card, yes, experimental) {
     if (!buf) die('cannot read ' + t.target);
     var c = classify(buf);
     if (c.bad.length) die('refusing: ' + c.bad.join('; '));
+    /* Boot recovery uses a stricter failure threshold for experimental
+     * builds. Recognising a pinned build does not promote it to proven. */
+    var patchedRecord = { patched: true, proven: !c.build.experimental };
     var bb = trusted(t.target);
     /* The experimental build is applied only on an explicit opt-in, and only
      * for the first edit (the one that writes the backup); once our backup of
@@ -334,7 +338,7 @@ function cmdApply(t, dpi, card, yes, experimental) {
     c.build.edits.forEach(function (e) { Buffer.from(e.patched, 'hex').copy(outBin, e.off); });
     var outConf = Buffer.from(conf.transform(origText.toString('utf8'), dpi, card), 'utf8');
     var binChange = !outBin.equals(buf), confChange = !outConf.equals(text);
-    if (!binChange && !confChange) { process.stdout.write('nothing to do; already in the requested state\n'); return; }
+    if (!binChange && !confChange) { process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(t.target, patchedRecord); return; }
 
     var need = (binChange ? (bb ? 0 : buf.length) + buf.length : 0) + (confChange ? (cb ? 0 : text.length) + outConf.length : 0) + MIN_FREE_MARGIN;
     var free = freeBytes(path.dirname(t.target));
@@ -347,6 +351,7 @@ function cmdApply(t, dpi, card, yes, experimental) {
     if (confChange && !cb) saveBackup(t.conf, text, {});
     if (binChange) writeInPlace(t.target, outBin);
     if (confChange) writeInPlace(t.conf, outConf);
+    record.ensure(t.target, patchedRecord);
     process.stdout.write('patched OK. aapd sha256 ' + sha256(outBin) + ', aapd.conf ' + dpi + ' dpi, card ' + card + '\n');
 }
 
@@ -373,6 +378,7 @@ function cmdRevert(t, yes, force, dropBackup) {
     if (!wrote && left.length) die(left.join('; '));
     left.forEach(function (l) { process.stdout.write(l + '\n'); });
     if (!wrote) process.stdout.write('already at the original; nothing to do\n');
+    if (/^(original|other)$/.test(undoState(t.target, true))) record.ensure(t.target, { patched: false });
     /* A file left restorable or with an untrusted backup keeps its backup,
      * and the revert fails: it is not undone. */
     var undone = plans.every(function (x) { var u = undoState(x.file, x.file === t.target); return u !== 'restorable' && u !== 'untrusted'; });
@@ -380,7 +386,7 @@ function cmdRevert(t, yes, force, dropBackup) {
         plans.forEach(function (x) {
             var u = undoState(x.file, x.file === t.target);
             if (u === 'restorable' || u === 'untrusted') return;
-            [backupPath(x.file), metaPath(x.file), backupPath(x.file) + '.tmp', metaPath(x.file) + '.tmp', x.file + '.woc-tmp'].forEach(function (f) {
+            [backupPath(x.file), metaPath(x.file), backupPath(x.file) + '.tmp', metaPath(x.file) + '.tmp', x.file + '.woc-tmp', record.recordPath(x.file)].forEach(function (f) {
                 try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') die('dropping ' + f + ': ' + e.message); }
             });
         });
@@ -404,6 +410,7 @@ function main() {
     else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--experimental] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-module.exports = { EDITS: EDITS, CODING: CODING, BUILDS: BUILDS, KNOWN: KNOWN, classify: classify, buildBySize: buildBySize };
+module.exports = { EDITS: EDITS, CODING: CODING, BUILDS: BUILDS, KNOWN: KNOWN, classify: classify, buildBySize: buildBySize,
+    trusted: trusted, binOther: binOther };
 
 if (require.main === module) main();

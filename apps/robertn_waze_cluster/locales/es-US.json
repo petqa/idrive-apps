@@ -23,6 +23,7 @@
     "Status: {0}": "Estado: {0}",
     "Connecting…": "Conectando…",
     "Removed after restart": "Se elimina al reiniciar",
+    "Removed — head unit kept restarting": "Eliminado — la unidad principal se reiniciaba una y otra vez",
     "Patched after restart": "Se aplica al reiniciar",
     "Removing patch…": "Eliminando parche…",
     "Patching…": "Aplicando parche…",

@@ -23,6 +23,7 @@
     "Status: {0}": "Stare: {0}",
     "Connecting…": "Se conectează…",
     "Removed after restart": "Eliminat după repornire",
+    "Removed — head unit kept restarting": "Eliminat — unitatea repornea continuu",
     "Patched after restart": "Aplicat după repornire",
     "Removing patch…": "Se elimină patch-ul…",
     "Patching…": "Se aplică patch-ul…",

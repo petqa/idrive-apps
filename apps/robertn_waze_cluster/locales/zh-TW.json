@@ -25,6 +25,7 @@
     "Status: {0}": "狀態：{0}",
     "Connecting…": "連線中…",
     "Removed after restart": "重新啟動後移除",
+    "Removed — head unit kept restarting": "已移除 — 主機反覆重新啟動",
     "Patched after restart": "重新啟動後套用",
     "Removing patch…": "正在移除修補…",
     "Patching…": "正在套用修補…",

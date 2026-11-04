@@ -12,24 +12,36 @@
  */
 var fs = require('fs');
 
+/* The hwvariant= values on the command line's text, unquoted, upper case. */
+function values(cmd) {
+    var v = [], re = /(?:^|\s)hwvariant=(\S*)/g, m;
+    while ((m = re.exec(cmd))) v.push(m[1].replace(/^"|"$/g, '').toUpperCase());
+    return v;
+}
+
 /* The rule on the command line's text (null: unreadable). */
 function rule(cmd) {
     function unknown(why) { return 'head unit: unknown variant is not supported (' + why + ')'; }
     if (cmd === null) return unknown('kernel command line unreadable');
-    var values = [], re = /(?:^|\s)hwvariant=(\S*)/g, m;
-    while ((m = re.exec(cmd))) values.push(m[1].replace(/^"|"$/g, '').toUpperCase());
-    if (values.indexOf('HIGHF') >= 0) return 'head unit: HIGH F is not supported';
-    if (!values.some(Boolean)) return unknown('no hwvariant= on the kernel command line');
-    var other = values.filter(function (v) { return v !== values[0]; });
-    if (other.length) return unknown('the kernel command line says hwvariant=' + values[0] + ' and hwvariant=' + other[0]);
+    var v = values(cmd);
+    if (!v.some(Boolean)) return unknown('no hwvariant= on the kernel command line');
+    var other = v.filter(function (x) { return x !== v[0]; });
+    if (other.length) return unknown('the kernel command line says hwvariant=' + v[0] + ' and hwvariant=' + other[0]);
     return null;
 }
 
-/* Why our parts must stay inert on this head unit, or null where they run. */
-function refused() {
-    var cmd;
-    try { cmd = fs.readFileSync(process.env.WOC_CMDLINE || '/proc/cmdline', 'utf8'); } catch (e) { cmd = null; }
-    return rule(cmd);
+function cmdline() {
+    try { return fs.readFileSync(process.env.WOC_CMDLINE || '/proc/cmdline', 'utf8'); } catch (e) { return null; }
 }
 
-module.exports = { refused: refused, rule: rule };
+/* Why our parts must stay inert on this head unit, or null where they run. */
+function refused() { return rule(cmdline()); }
+
+/* This head unit's variant (HIGH, MID, HIGHF, ...), or null where it is
+ * refused. */
+function variant() {
+    var cmd = cmdline();
+    return rule(cmd) ? null : values(cmd)[0];
+}
+
+module.exports = { refused: refused, rule: rule, variant: variant };

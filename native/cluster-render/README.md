@@ -497,15 +497,17 @@ share a 2D pass, and the passes' render order follows the stack exactly
 
 ## Supported head units
 
-On a head unit whose kernel command line says `hwvariant=HIGHF`, has no
-`hwvariant=`, or has two that disagree (`src/head_unit.cpp`, the rule
+Every head-unit variant runs, HIGH F included (0.3.9 refused it). On a
+head unit whose variant cannot be read, a kernel command line with no
+`hwvariant=` or two that disagree (`src/head_unit.cpp`, the rule
 waze-on-cluster's patches follow too), cluster-render starts nothing that
-reaches the cluster: neither the generation's service nor Dcsm2, vsomeip or RAMSES. It
+reaches the cluster: neither the generation's service nor Dcsm2, vsomeip
+or RAMSES. It
 logs the reason once and stays up holding only its socket, so neither the
 socket nor `Restart=on-failure` starts it again: a status request gets
 `not supported on this car (head unit: ...)`, any other message an `error`
 event with that reason, and the status file says the same. A SIGTERM ends
-it with 0. Every other variant runs.
+it with 0.
 
 ## Identity and packaging
 

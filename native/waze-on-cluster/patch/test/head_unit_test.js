@@ -47,18 +47,16 @@ function fresh() {
 }
 function apply(extra) { return run(CARPLAY_PATCH, ['apply', '--panel', 'high', '--target', tgt, '--yes'].concat(extra || ['--unproven'])); }
 function untouched() { return fs.readFileSync(tgt).equals(stock) && !fs.existsSync(tgt + '.woc-orig'); }
-var NO_HWVARIANT = 'console=ttyS0 quiet\n';
 
 try {
-    [['HIGH', headUnit.HIGH], ['MID', headUnit.MID]].forEach(function (u) {
+    [['HIGH', headUnit.HIGH], ['MID', headUnit.MID], ['HIGH F', headUnit.HIGHF]].forEach(function (u) {
         fresh();
         headUnit.set(u[1]);
         var r = apply();
         ok(u[0] + ': carplay apply patches', r.code === 0 && /patched OK/.test(r.out) && !fs.readFileSync(tgt).equals(stock), r.out);
     });
-    [['HIGH F', headUnit.HIGHF, 'head unit: HIGH F is not supported'],
-     ['no kernel command line', null, 'head unit: unknown variant is not supported (kernel command line unreadable)'],
-     ['no hwvariant=', NO_HWVARIANT, 'head unit: unknown variant is not supported (no hwvariant= on the kernel command line)']].forEach(function (u) {
+    [['no kernel command line', null, 'head unit: unknown variant is not supported (kernel command line unreadable)'],
+     ['no hwvariant=', headUnit.NONE, headUnit.REFUSED]].forEach(function (u) {
         fresh();
         headUnit.set(u[1]);
         var r = apply([]);
@@ -70,20 +68,19 @@ try {
     fresh();
     headUnit.set(headUnit.HIGH);
     apply();
-    headUnit.set(headUnit.HIGHF);
+    headUnit.set(headUnit.NONE);
     var r = run(CARPLAY_PATCH, ['revert', '--target', tgt, '--yes']);
-    ok('HIGH F: carplay revert restores the original', r.code === 0 && fs.readFileSync(tgt).equals(stock), r.out);
+    ok('no hwvariant=: carplay revert restores the original', r.code === 0 && fs.readFileSync(tgt).equals(stock), r.out);
 
     /* aapd: the gate comes before any file is read, so these paths need not exist. */
     var aa = ['apply', '--target', path.join(dir, 'aapd'), '--conf', path.join(dir, 'aapd.conf'), '--coding', path.join(dir, 'coding'), '--yes'];
     r = run(AAPD_PATCH, aa);
-    ok('HIGH F: aapd apply refuses with the reason line', r.code !== 0 && r.out === 'error: refusing: head unit: HIGH F is not supported\n', r.out);
-    headUnit.set(NO_HWVARIANT);
-    r = run(AAPD_PATCH, aa);
-    ok('no hwvariant=: aapd apply refuses', r.code !== 0 && /^error: refusing: head unit: unknown variant is not supported/.test(r.out), r.out);
-    headUnit.set(headUnit.HIGH);
-    r = run(AAPD_PATCH, aa);
-    ok('HIGH: aapd apply gets past the gate (to the coding check)', r.code !== 0 && /cluster coding cannot be read/.test(r.out), r.out);
+    ok('no hwvariant=: aapd apply refuses with the reason line', r.code !== 0 && r.out === 'error: refusing: ' + headUnit.REFUSED + '\n', r.out);
+    [['HIGH', headUnit.HIGH], ['HIGH F', headUnit.HIGHF]].forEach(function (u) {
+        headUnit.set(u[1]);
+        r = run(AAPD_PATCH, aa);
+        ok(u[0] + ': aapd apply gets past the gate (to the coding check)', r.code !== 0 && /cluster coding cannot be read/.test(r.out), r.out);
+    });
 } finally {
     cp.execFileSync('rm', ['-rf', dir]);
 }

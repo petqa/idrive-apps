@@ -35,6 +35,7 @@ var crypto = require('crypto');
 var PATCH = path.join(__dirname, '..');
 var ap = require('../aapd_patch.js');
 var conf = require('../aapd_conf.js');
+var record = require('../patch_record.js');
 
 var fails = 0, dirs = [];
 function ok(name, cond, detail) {
@@ -188,6 +189,8 @@ function onlyEdits(a, b) {
         hx(written, 0x15b3e0, 4) === 'f20f1005' &&
         0x15b3e8 + written.readInt32LE(0x15b3e4) === 0x524eb0 && written.readDoubleLE(0x524eb0) === 12.3);
     ok('apply: the backup records the experimental version', JSON.parse(fs.readFileSync(t.bin + '.woc-orig.json', 'utf8')).version === B2144.version);
+    var rec = record.current(t.bin);
+    ok('apply: boot recovery records this build as patched but unproven', rec && rec.patched === true && rec.proven === false);
     ok('status: experimental, modified build; all patched; the 12.3 geometry at 180 dpi',
         /known:\s+experimental, modified build/.test(status(t)) && (status(t).match(/PATCHED/g) || []).length === 5 &&
         /PATCHED \(180 dpi, card shown, crop 1280x720:0,0,1280,564\)/.test(status(t)), status(t));
@@ -199,6 +202,15 @@ function onlyEdits(a, b) {
         JSON.parse(fs.readFileSync(t.conf, 'utf8')).SCREENS.KOMBI_DISPLAY.CODEC_DEFINITION.HIGH_1080P.REPORTED_SCREEN_DENSITY === 240 &&
         onlyEdits(SRC, fs.readFileSync(t.bin)), r2.out);
 
+    /* Refresh metadata left by a version which knew only proven builds,
+     * even when the binary and configuration need no further writes. */
+    record.write(t.bin, { patched: true, proven: true });
+    var noChange = patcher(t, ['apply', '--dpi', '240', '--yes']);
+    rec = record.current(t.bin);
+    ok('no-op apply repairs stale proven metadata without changing the binary',
+        noChange.code === 0 && /nothing to do/.test(noChange.out) && rec && rec.patched && rec.proven === false &&
+        fs.readFileSync(t.bin).equals(written), noChange.out);
+
     /* revert needs no opt-in and restores byte-exact. */
     var r3 = patcher(t, ['revert', '--yes']);
     ok('revert without --experimental: both originals back byte-exact', r3.code === 0 && sha(t.bin) === sha(SRC) && sha(t.conf) === sha(SRCCONF), r3.out);
@@ -208,14 +220,22 @@ function onlyEdits(a, b) {
 /* ---- refusals: nothing is written on a wrong coding, build, anchor,
  * aapd.conf, backup or disk ---- */
 (function refusalTests() {
-    [headUnit.HIGHF, null].forEach(function (cmdline) {
+    [headUnit.NONE, null].forEach(function (cmdline) {
         var t = unit();
         headUnit.set(cmdline);
         var r = patcher(t, ['apply', '--yes', '--experimental']);
         headUnit.set(headUnit.HIGH);
-        ok('experimental opt-in never bypasses the head-unit gate: ' + (cmdline ? 'HIGHF' : 'unreadable'),
+        ok('experimental opt-in never bypasses the head-unit gate: ' + (cmdline ? 'missing hwvariant' : 'unreadable'),
             r.code === 1 && /refusing: head unit:/.test(r.out) && untouched(t), r.out);
     });
+    var highf = unit();
+    headUnit.set(headUnit.HIGHF);
+    var highfRefused = patcher(highf, ['apply', '--yes']);
+    var highfApplied = patcher(highf, ['apply', '--yes', '--experimental']);
+    headUnit.set(headUnit.HIGH);
+    ok('HIGH F follows upstream: supported but still requires experimental opt-in',
+        highfRefused.code === 1 && /is experimental/.test(highfRefused.out) && highfApplied.code === 0,
+        highfRefused.out + highfApplied.out);
     [[coding(9), 'KI_KOMBI_VARIANT 9 is not the proven'], [coding(2), 'KI_KOMBI_VARIANT 2 is not the proven'],
      [coding(7, 0x0b), 'coding not valid'], [Buffer.alloc(16), 'is 16 bytes']].forEach(function (c) {
         var u = unit(); fs.writeFileSync(u.coding, c[0]);
@@ -386,11 +406,11 @@ function onlyEdits(a, b) {
     var r = hook('activate');
     ok('install hook: experimental conflict, both originals untouched, no opt-in',
         r.code === 0 && /experimental aapd build/.test(r.result.aa && r.result.aa.conflict) && untouched(t), r.out);
-    headUnit.set(headUnit.HIGHF);
+    headUnit.set(headUnit.NONE);
     r = hook('activate');
     headUnit.set(headUnit.HIGH);
     ok('install hook: head-unit refusal takes precedence over experimental conflict',
-        r.code === 0 && /HIGH F/.test(r.result.aa && r.result.aa.conflict) && untouched(t), r.out);
+        r.code === 0 && /unknown variant/.test(r.result.aa && r.result.aa.conflict) && untouched(t), r.out);
     r = patcher(t, ['apply', '--yes', '--experimental']);
     ok('install hook fixture: manual opt-in succeeds', r.code === 0, r.out);
     var patched = sha(t.bin);
@@ -429,7 +449,11 @@ function onlyEdits(a, b) {
         fs.writeFileSync(systemctl, '#!' + process.execPath + '\nrequire("fs").appendFileSync(' +
             JSON.stringify(calls) + ',"UNEXPECTED systemctl\\n");process.exit(99);\n', { mode: 0o755 });
         var state = path.join(t.d, 'var', 'aa-boot-recovery.json');
-        fs.writeFileSync(state, JSON.stringify({ fails: 1, arm: { boot: 'previous', crashes: 1 } }));
+        /* A recorded experimental patch restores at its first failed boot.
+         * A changed/missing record is unknown and keeps upstream's threshold
+         * of two. Include unknown: legacy counters are deliberately reset. */
+        fs.writeFileSync(state, JSON.stringify({ fails: scenario === 'patched' ? 0 : 1, unknown: 0,
+            arm: { boot: 'previous', patch: scenario === 'patched' ? 'unproven' : 'unknown', crashes: 1 } }));
         fs.writeFileSync(path.join(t.d, 'bootid'), 'review-boot\n');
         var env = Object.assign({}, process.env, {
             WOC_AAPD: t.bin, WOC_AAPD_CONF: t.conf, WOC_CODING: t.coding,
@@ -439,7 +463,7 @@ function onlyEdits(a, b) {
             WOC_PATCH_SOCK: path.join(t.d, 'shm', 'patch.sock'),
             WOC_REMOUNT_LOCK: path.join(t.d, 'shm', 'remount.lock'),
             WOC_MOUNT: mount, WOC_PROC_MOUNTS: mounts, WOC_SYSTEMCTL: systemctl,
-            WOC_RECOVERY_THRESHOLD: '2', WOC_AA_EXPERIMENTAL: ''
+            WOC_SIN_DIR: path.join(t.d, 'absent-sin'), WOC_AA_EXPERIMENTAL: ''
         });
         var r = cp.spawnSync(process.execPath, [path.join(PATCH, 'recovery.js'), 'boot', 'aapd'],
             { env: env, encoding: 'utf8', timeout: 60000 });

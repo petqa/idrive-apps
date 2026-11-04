@@ -23,6 +23,7 @@
     "Status: {0}": "สถานะ: {0}",
     "Connecting…": "กำลังเชื่อมต่อ…",
     "Removed after restart": "ลบหลังรีสตาร์ท",
+    "Removed — head unit kept restarting": "ลบแล้ว — เฮดยูนิตรีสตาร์ทซ้ำ ๆ",
     "Patched after restart": "ใช้แพตช์หลังรีสตาร์ท",
     "Removing patch…": "กำลังลบแพตช์…",
     "Patching…": "กำลังใช้แพตช์…",

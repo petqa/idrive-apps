@@ -23,6 +23,7 @@
     "Status: {0}": "Trạng thái: {0}",
     "Connecting…": "Đang kết nối…",
     "Removed after restart": "Gỡ sau khi khởi động lại",
+    "Removed — head unit kept restarting": "Đã gỡ — hệ thống liên tục khởi động lại",
     "Patched after restart": "Vá sau khi khởi động lại",
     "Removing patch…": "Đang gỡ bản vá…",
     "Patching…": "Đang vá…",

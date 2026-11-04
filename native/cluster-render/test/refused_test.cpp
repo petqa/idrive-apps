@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 Robert Nisipeanu */
 /* Host test for the launcher built for the host (argv[1]) on a head unit
- * that refuses it (refused.h) and on HIGH; a fake cluster-render-idrive7
- * beside it records whether the generation's service starts.
+ * that refuses it (refused.h), and on HIGH and HIGH F; a fake
+ * cluster-render-idrive7 beside it records whether the generation's
+ * service starts.
  *
  *   refused_test build/host/cluster-render   (from cluster-render's folder) */
 #include <cerrno>
@@ -115,30 +116,32 @@ int main(int argc, char **argv)
     chmod(fake.c_str(), 0755);
     const bool proc = access("/proc/self/exe", F_OK) == 0;
 
-    pid_t pid = run("hwvariant=HIGHF\n");
+    pid_t pid = run("console=ttyS0 quiet\n");
     const std::string st = ask("{\"op\":\"status\"}");
     const std::string hello = ask("{\"op\":\"hello\",\"app\":\"test\",\"proto\":1}");
     cr::Json j;
-    ok("HIGH F: a status request is told not supported",
+    ok("no hwvariant=: a status request is told not supported",
        cr::parse_json(st, &j) && j["ev"] == "status" &&
-           j["text"] == "not supported on this car (head unit: HIGH F is not supported)\n", st);
-    ok("HIGH F: hello gets an error, not supported",
+           j["text"] == "not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))\n", st);
+    ok("no hwvariant=: hello gets an error, not supported",
        cr::parse_json(hello, &j) && j["ev"] == "error" && j["op"] == "hello" &&
-           j["reason"] == "not supported on this car (head unit: HIGH F is not supported)", hello);
-    ok("HIGH F: the status file says so",
-       slurp(status_file) == "not supported on this car (head unit: HIGH F is not supported)\n", slurp(status_file));
-    ok("HIGH F: still up after its clients", exited(pid, 1000) == -1);
-    ok("HIGH F: the generation's service never started", access(marker.c_str(), F_OK) != 0);
+           j["reason"] == "not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))", hello);
+    ok("no hwvariant=: the status file says so",
+       slurp(status_file) == "not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))\n", slurp(status_file));
+    ok("no hwvariant=: still up after its clients", exited(pid, 1000) == -1);
+    ok("no hwvariant=: the generation's service never started", access(marker.c_str(), F_OK) != 0);
     kill(pid, SIGTERM);
-    ok("HIGH F: a SIGTERM ends it with 0", exited(pid, 3000) == 0);
-    ok("HIGH F: its socket is gone", access(sock.c_str(), F_OK) != 0);
+    ok("no hwvariant=: a SIGTERM ends it with 0", exited(pid, 3000) == 0);
+    ok("no hwvariant=: its socket is gone", access(sock.c_str(), F_OK) != 0);
 
-    pid = run("console=ttyS0 hwvariant=HIGH hwrevision=D1 quiet\n");
-    const int code = exited(pid, 3000);
-    if (code < 0)
-        kill(pid, SIGKILL), waitpid(pid, nullptr, 0);
-    ok("HIGH: goes on to start the generation's service", code >= 0 && access(status_file.c_str(), F_OK) != 0 &&
-       (!proc || access(marker.c_str(), F_OK) == 0), "exit " + std::to_string(code));
+    for (const char *unit : {"HIGH", "HIGHF"}) {
+        pid = run(("console=ttyS0 hwvariant=" + std::string(unit) + " quiet\n").c_str());
+        const int code = exited(pid, 3000);
+        if (code < 0)
+            kill(pid, SIGKILL), waitpid(pid, nullptr, 0);
+        ok((std::string(unit) + ": goes on to start the generation's service").c_str(), code >= 0 &&
+           access(status_file.c_str(), F_OK) != 0 && (!proc || access(marker.c_str(), F_OK) == 0), "exit " + std::to_string(code));
+    }
 
     const std::string unit = slurp("systemd/cluster-render.service");
     ok("cluster-render.service restarts on failure only", unit.find("\nRestart=on-failure\n") != std::string::npos);

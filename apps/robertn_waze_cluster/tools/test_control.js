@@ -483,7 +483,7 @@ test('a conflict the install left alone is shown, and CarPlay\'s Patch button st
 });
 
 test('a head unit that refuses the tool: not supported in both sections, also patched or with an apply pending; no Patch, zoom or card; the map unavailable; the turn box greyed', async (render, patch) => {
-    const NOT = 'not supported on this car (head unit: HIGH F is not supported)';
+    const NOT = 'not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))';
     const D = [150, 400, 10];
     render.hide = null;
     render.guideDisabled = 1;
@@ -521,6 +521,42 @@ test('a head unit that refuses the tool: not supported in both sections, also pa
     await sleep(50);
     assert.strictEqual(patch.count('apply'), 0);
     assert.deepStrictEqual(render.received, []);
+    c.close();
+});
+
+test('a patch boot recovery removed says so until its Patch button applies it again', async (render, patch) => {
+    const c = control();
+    c.open();
+    await until('connected', () => c.connectedPatch());
+    patch.recovered = 2;
+    patch.announce('original', null, null);
+    await until('removed', () => c.statusText() === 'Status: Removed — head unit kept restarting');
+    assert.deepStrictEqual([c.canEnable(), c.canDisable()], [true, false]);
+    c.enableMap();
+    await until('sent', () => patch.received.some((m) => m.cmd === 'apply'));
+    patch.recovered = null;
+    patch.announce('patched', 'high', null);
+    await until('patched', () => c.statusText() === 'Status: Patched');
+    patch.aa = { state: 'original', density: 180, densities: [150, 400, 10], recovered: 1 };
+    patch.announce('patched', 'high', null);
+    await until('aa removed', () => c.aaStatusText() === 'Status: Removed — head unit kept restarting');
+    assert.strictEqual(c.canEnableAa(), true);
+    patch.aa = { state: 'patched', dpi: 180, density: 180, densities: [150, 400, 10] };
+    patch.announce('patched', 'high', null);
+    await until('aa patched', () => c.aaStatusText() === 'Status: Patched');
+    /* aapd restored, its aapd.conf left patched: still the restore */
+    patch.aa = { state: 'unknown', density: 180, densities: [150, 400, 10], recovered: 1 };
+    patch.announce('patched', 'high', null);
+    await until('aa partly', () => c.aaStatusText() === 'Status: Removed — head unit kept restarting');
+    assert.strictEqual(c.canEnableAa(), true);
+    /* A head unit that refuses the tool, after an earlier restore: not supported first */
+    const NOT = 'not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))';
+    patch.recovered = 2;
+    patch.conflict = NOT;
+    patch.aa = { state: 'original', density: 180, densities: [150, 400, 10], recovered: 1, conflict: NOT };
+    patch.announce('original', null, null);
+    await until('refused first', () => c.statusText() === 'Status: Not supported on this car' && c.aaStatusText() === 'Status: Not supported on this car');
+    assert.deepStrictEqual([c.canEnable(), c.canEnableAa()], [false, false]);
     c.close();
 });
 

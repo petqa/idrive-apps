@@ -30,13 +30,15 @@
  *                        Android Auto's, with a normal head-unit restart
  *     daemon -> app     {"ev":"status","state":"original"|"patched"|"unknown"|
  *                        "busy"|"error","panel":"high"|"mid"|null,"mode","res","safe",
- *                        "carplay","reason","pending","conflict","busy","restart","aa"}
+ *                        "carplay","reason","pending","conflict","recovered","busy","restart","aa"}
  *                       res "WxH" and safe "WxH+X+Y": the advertised size and
  *                       its safe area (a daemon before the safe area omits safe)
  *                       carplay "deferred": the patch is written but takes effect
  *                       only at the next head-unit start (a restart is needed)
  *                       pending "apply" | "revert": which change waits for it
  *                       conflict: why the install left carplay as it was
+ *                       recovered: boot recovery removed the patch (after that
+ *                        many failed head-unit starts); also in aa
  *                       aa: Android Auto's patch, {"state":"original"|"patched"|
  *                        "unknown"|"absent"|"busy"|"error","reason","conflict",
  *                        "pending","aapd","dpi","diskCard","runDpi","runCard","density",
@@ -382,6 +384,9 @@ class WazeClusterControl extends EventEmitter {
         if (ps.state === 'error') {
             return t('Failed');
         }
+        if (ps.recovered && ps.state !== 'patched' && !headUnitRefused(ps.conflict)) {
+            return t('Removed — head unit kept restarting');
+        }
         if (ps.conflict && (ps.state !== 'patched' || headUnitRefused(ps.conflict))) {
             return conflictText(ps.conflict);
         }
@@ -566,6 +571,9 @@ class WazeClusterControl extends EventEmitter {
         }
         if (aa.pending && !(aa.pending === 'apply' && headUnitRefused(aa.conflict))) {
             return aa.pending === 'revert' ? t('Removed after restart') : t('Patched after restart');
+        }
+        if (aa.recovered && aa.state !== 'patched' && !headUnitRefused(aa.conflict)) {
+            return t('Removed — head unit kept restarting');
         }
         if (aa.state === 'absent' || (aa.conflict && (aa.state !== 'patched' || headUnitRefused(aa.conflict)))) {
             return conflictText(aa.conflict || 'no Android Auto');

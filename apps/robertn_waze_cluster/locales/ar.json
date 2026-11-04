@@ -23,6 +23,7 @@
     "Status: {0}": "الحالة: {0}",
     "Connecting…": "جارٍ الاتصال…",
     "Removed after restart": "يُزال بعد إعادة التشغيل",
+    "Removed — head unit kept restarting": "أُزيل — ظلت الوحدة الرئيسية تعيد التشغيل",
     "Patched after restart": "يُطبَّق بعد إعادة التشغيل",
     "Removing patch…": "جارٍ إزالة التصحيح…",
     "Patching…": "جارٍ تطبيق التصحيح…",

@@ -185,6 +185,7 @@ class FakePatch extends LineServer {
         this.carplay = null;  /* 'deferred' once a patch is written but not active */
         this.pending = null;  /* 'apply' | 'revert': the change waiting for a head-unit start */
         this.conflict = null; /* why the install left carplay as it was */
+        this.recovered = null; /* boot recovery removed the patch after that many failed starts */
         this.busy = false;
         this.reason = null;
         this.aa = { state: 'original', density: 180, densities: [150, 400, 10] };   /* Android Auto's patch */
@@ -209,7 +210,7 @@ class FakePatch extends LineServer {
     _status() {
         return { ev: 'status', state: this.busy ? 'busy' : this.state, panel: this.panel,
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
-            pending: this.pending, conflict: this.conflict, aa: this.aa,
+            pending: this.pending, conflict: this.conflict, recovered: this.recovered, aa: this.aa,
             busy: this.busy ? 'carplay' : this.aa.state === 'busy' ? 'aa' : this._rebooting ? 'restart' : null,
             restart: this.restart };
     }

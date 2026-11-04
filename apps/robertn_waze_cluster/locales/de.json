@@ -23,6 +23,7 @@
     "Status: {0}": "Status: {0}",
     "Connecting…": "Verbinden…",
     "Removed after restart": "Nach Neustart entfernt",
+    "Removed — head unit kept restarting": "Entfernt — Headunit startete immer wieder neu",
     "Patched after restart": "Nach Neustart gepatcht",
     "Removing patch…": "Patch wird entfernt…",
     "Patching…": "Wird gepatcht…",

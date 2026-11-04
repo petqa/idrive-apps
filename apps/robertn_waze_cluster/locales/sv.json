@@ -23,6 +23,7 @@
     "Status: {0}": "Status: {0}",
     "Connecting…": "Ansluter…",
     "Removed after restart": "Tas bort efter omstart",
+    "Removed — head unit kept restarting": "Borttagen — huvudenheten startade om hela tiden",
     "Patched after restart": "Patchad efter omstart",
     "Removing patch…": "Tar bort patch…",
     "Patching…": "Patchar…",

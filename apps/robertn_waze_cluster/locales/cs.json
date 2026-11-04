@@ -23,6 +23,7 @@
     "Status: {0}": "Stav: {0}",
     "Connecting…": "Připojování…",
     "Removed after restart": "Odebráno po restartu",
+    "Removed — head unit kept restarting": "Odebráno — jednotka se stále restartovala",
     "Patched after restart": "Opraveno po restartu",
     "Removing patch…": "Odebírání opravy…",
     "Patching…": "Použití opravy…",

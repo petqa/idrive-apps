@@ -64,7 +64,7 @@ int main()
         return 1;
     const std::string dir = tmpl;
     sock = dir + "/ctl.sock";
-    const std::string why = "head unit: HIGH F is not supported";
+    const std::string why = "head unit: unknown variant is not supported (no hwvariant= on the kernel command line)";
     const pid_t pid = fork();
     if (pid == 0) {
         cld::Config cfg;
@@ -84,7 +84,7 @@ int main()
     ok("the owner gets one status line, and nothing more", first == refused_status(why) + "\n", first);
     ok("unsupported, not supported on this car, the turn box greyed",
        parse_flat_json(refused_status(why), &st) && st["state"] == "unsupported" &&
-           st["reason"] == "Unavailable" && st["refused"] == "not supported on this car (head unit: HIGH F is not supported)" &&
+           st["reason"] == "Unavailable" && st["refused"] == "not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))" &&
            st["guide_disabled"] == "1" &&
            !st.count("hide_bmw_guidance"));
     const std::string guide = "{\"cmd\":\"guide\",\"hide\":0}\n{\"cmd\":\"start\",\"target\":\"map\"}\n";

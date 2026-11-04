@@ -20,7 +20,8 @@
  * another program are left untouched (a conflict, exit 0); a remount failure before
  * any write exits non-zero. On a head unit that refuses our parts the
  * install writes nothing, patchd refuses CarPlay's Patch button and the
- * removal reverts; MID patches as HIGH. The pending marker is the world-readable JSON
+ * removal reverts; MID and HIGH F patch as HIGH. The first install on HIGH F
+ * applies the patch again to an original 0.8.2's boot recovery restored. The pending marker is the world-readable JSON
  * patchd and the app read. Runs the real patchd.js and carplay_patch.js on a
  * temporary copy, with a fake /proc (carplay's process holds the inode it
  * runs), a fake mount that, like the kernel, refuses read-only while a file a
@@ -161,7 +162,7 @@ function headUnitStart() {
 }
 function fresh(buf) {
     stops();
-    [PENDING, RUNNING, BAK, TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    [PENDING, RUNNING, BAK, TGT + '.woc-orig.json', TGT + '.woc-patch.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
     fs.writeFileSync(TGT, buf, { mode: 0o755 });
     runs(TGT);
 }
@@ -386,6 +387,22 @@ async function main() {
     await daemonStatus();
     ok('recovery\'s link: removed by patchd once nothing runs it, / read-only', !fs.existsSync(RUNNING) && ro());
 
+    /* Boot recovery's own restore at its threshold (the boot step's, nothing
+     * running): patchd reports it, and an install leaves the patch off. */
+    fresh(SRCBUF);
+    hook('activate');
+    headUnitStart();
+    stops();
+    r = cp.spawnSync(process.execPath, ['-e', 'var r = require(process.argv[1]); r.restoreTarget(r.TARGETS.carplay, true, 2, function (e, o) { process.stdout.write(String(e || o)); });',
+        path.join(__dirname, '..', 'recovery.js')], { env: ENV, encoding: 'utf8' });
+    ok('boot recovery\'s restore: the original, / read-only', r.stdout === 'restored' && disk() === sha(SRCBUF) && ro(), r.stdout + r.stderr);
+    st = await daemonStatus();
+    ok('boot recovery\'s restore: patchd reports the original and the failed starts it was made at', st.state === 'original' && st.recovered === 2 && !st.pending, JSON.stringify(st));
+    before = disk();
+    r = hook('activate');
+    ok('boot recovery\'s restore: an install leaves the patch off, and says why', r.code === 0 && disk() === before && marker() === null &&
+        /boot recovery removed the patch after 2 failed head-unit starts/.test(r.result.status || ''), JSON.stringify(r.result));
+
     /* A write window cut short between keeping the link and the patcher's
      * rename leaves a link that is carplay's own file: patchd removes it as
      * it starts, carplay running or not. */
@@ -501,11 +518,9 @@ async function main() {
 
     /* A head unit that refuses our parts; a patch of ours from before is
      * left to boot recovery. */
-    var NOT_HIGHF = 'not supported on this car (head unit: HIGH F is not supported)';
-    [['HIGH F', headUnit.HIGHF, NOT_HIGHF],
-     ['no kernel command line', null, 'not supported on this car (head unit: unknown variant is not supported (kernel command line unreadable))'],
-     ['no hwvariant=', 'console=ttyS0 quiet\n',
-      'not supported on this car (head unit: unknown variant is not supported (no hwvariant= on the kernel command line))']].forEach(function (c) {
+    var NOT = 'not supported on this car (' + headUnit.REFUSED + ')';
+    [['no kernel command line', null, 'not supported on this car (head unit: unknown variant is not supported (kernel command line unreadable))'],
+     ['no hwvariant=', headUnit.NONE, NOT]].forEach(function (c) {
         fresh(SRCBUF);
         headUnit.set(c[1]);
         r = hook('activate');
@@ -513,29 +528,78 @@ async function main() {
             marker() === null && !r.result.reboot && r.result.conflict === c[2] && ro(), JSON.stringify(r.result));
         headUnit.set(headUnit.HIGH);
     });
+    [['MID', headUnit.MID], ['HIGH F', headUnit.HIGHF]].forEach(function (v) {
+        fresh(SRCBUF);
+        headUnit.set(v[1]);
+        r = hook('activate');
+        ok(v[0] + ': activate patches as on HIGH, pending', r.code === 0 && !r.result.conflict && marker() && marker().action === 'apply' && slot() === 'bcf2f7ff',
+            JSON.stringify(r.result));
+        headUnit.set(headUnit.HIGH);
+    });
     fresh(SRCBUF);
-    headUnit.set(headUnit.MID);
-    r = hook('activate');
-    ok('MID: activate patches as on HIGH, pending', r.code === 0 && !r.result.conflict && marker() && marker().action === 'apply' && slot() === 'bcf2f7ff',
-        JSON.stringify(r.result));
-    fresh(SRCBUF);
-    headUnit.set(headUnit.HIGHF);
+    headUnit.set(headUnit.NONE);
     st = await daemonStatus();
-    ok('HIGH F: patchd reports the original and the conflict', st.state === 'original' && st.conflict === NOT_HIGHF, JSON.stringify(st));
+    ok('no hwvariant=: patchd reports the original and the conflict', st.state === 'original' && st.conflict === NOT, JSON.stringify(st));
     m = await daemonCommand({ cmd: 'apply', panel: 'high', mode: 'avb' }, 'refused');
-    ok('HIGH F: patchd refuses CarPlay\'s Patch button, nothing written', m.reason === 'head unit: HIGH F is not supported' &&
+    ok('no hwvariant=: patchd refuses CarPlay\'s Patch button, nothing written', m.reason === headUnit.REFUSED &&
         disk() === sha(SRCBUF) && !fs.existsSync(BAK) && marker() === null && ro(), JSON.stringify(m));
     headUnit.set(headUnit.HIGH);
     hook('activate');
     headUnitStart();
     patchedIno = ino(TGT);
-    headUnit.set(headUnit.HIGHF);
+    headUnit.set(headUnit.NONE);
     r = hook('activate');
-    ok('HIGH F, patched before: activate leaves it, conflict, nothing pending', r.code === 0 && ino(TGT) === patchedIno && marker() === null &&
-        r.result.conflict === NOT_HIGHF, JSON.stringify(r.result));
+    ok('no hwvariant=, patched before: activate leaves it, conflict, nothing pending', r.code === 0 && ino(TGT) === patchedIno && marker() === null &&
+        r.result.conflict === NOT, JSON.stringify(r.result));
     r = hook('deactivate');
-    ok('HIGH F, patched before: deactivate reverts it, drops the backup', r.code === 0 && disk() === sha(SRCBUF) && !fs.existsSync(BAK) &&
+    ok('no hwvariant=, patched before: deactivate reverts it, drops the backup', r.code === 0 && disk() === sha(SRCBUF) && !fs.existsSync(BAK) &&
         marker() && marker().action === 'revert' && ro(), JSON.stringify(r.result));
+    headUnit.set(headUnit.HIGH);
+
+    /* A car 0.8.2's boot recovery restored on HIGH F: the original with our
+     * trusted backup. The first install on HIGH F applies the patch again,
+     * pending, and marks CarPlay done; none after it, nor on HIGH, nor over
+     * an untrusted backup, which stays unmarked for the next install. */
+    var MARK = path.join(ENV.WOC_STATE_DIR, 'highf-repatched');
+    function restored(unit) {
+        try { fs.unlinkSync(MARK); } catch (e) {}
+        headUnit.set(headUnit.HIGH);
+        fresh(SRCBUF);
+        hook('activate');
+        headUnitStart();
+        cp.execFileSync(process.execPath, [path.join(__dirname, '..', 'carplay_patch.js'), 'revert', '--target', TGT, '--yes']);
+        headUnitStart();
+        headUnit.set(unit);
+    }
+    restored(headUnit.HIGHF);
+    r = hook('activate');
+    m = marker();
+    var mark = null;
+    try { mark = JSON.parse(fs.readFileSync(MARK, 'utf8')); } catch (e) {}
+    ok('HIGH F restored by 0.8.2: the install applies the patch again, pending, and marks it done', r.code === 0 && m && m.action === 'apply' &&
+        slot() === 'bcf2f7ff' && r.result.reset === true && mark && mark.carplay === 'applied', JSON.stringify([r.result, mark]));
+    st = await daemonStatus();
+    ok('HIGH F restored by 0.8.2: patchd reports the pending apply', st.pending === 'apply' && !st.conflict, JSON.stringify(st));
+    headUnitStart();
+    cp.execFileSync(process.execPath, [path.join(__dirname, '..', 'carplay_patch.js'), 'revert', '--target', TGT, '--yes']);
+    headUnitStart();
+    r = hook('activate');
+    ok('HIGH F, marker present: a Remove patch since stays', r.code === 0 && disk() === sha(SRCBUF) && marker() === null && /turned off/.test(r.result.status),
+        JSON.stringify(r.result));
+    restored(headUnit.HIGH);
+    r = hook('activate');
+    ok('HIGH: an original with our backup stays off, no marker', r.code === 0 && disk() === sha(SRCBUF) && marker() === null &&
+        /turned off/.test(r.result.status) && !fs.existsSync(MARK), JSON.stringify(r.result));
+    restored(headUnit.HIGHF);
+    fs.writeFileSync(TGT + '.woc-orig.json', JSON.stringify({ sha256_original: '0'.repeat(64) }));
+    r = hook('activate');
+    ok('HIGH F, untrusted backup: nothing written, CarPlay left for the next install', r.code === 0 && disk() === sha(SRCBUF) && marker() === null &&
+        !fs.existsSync(MARK), JSON.stringify(r.result));
+    restored(headUnit.HIGHF);
+    fs.unlinkSync(TGT + '.woc-orig.json');
+    r = hook('activate');
+    ok('HIGH F, a backup without its record: nothing written', r.code === 0 && disk() === sha(SRCBUF) && marker() === null, JSON.stringify(r.result));
+    try { fs.unlinkSync(MARK); } catch (e) {}
     headUnit.set(headUnit.HIGH);
 
     ok('never a systemctl, kill or reboot', calls().length === 0, calls().join('; '));

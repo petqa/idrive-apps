@@ -23,6 +23,7 @@
     "Status: {0}": "Состояние: {0}",
     "Connecting…": "Подключение…",
     "Removed after restart": "Удалится после перезапуска",
+    "Removed — head unit kept restarting": "Удалён — устройство постоянно перезапускалось",
     "Patched after restart": "Применится после перезапуска",
     "Removing patch…": "Удаление патча…",
     "Patching…": "Применение патча…",

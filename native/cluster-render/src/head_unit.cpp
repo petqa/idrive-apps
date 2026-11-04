@@ -35,8 +35,6 @@ std::string head_unit_rule(const std::string *cmd)
             c = (char)std::toupper((unsigned char)c);
         values.push_back(v);
     }
-    if (std::find(values.begin(), values.end(), "HIGHF") != values.end())
-        return "head unit: HIGH F is not supported";
     if (std::all_of(values.begin(), values.end(), [](const std::string &v) { return v.empty(); }))
         return unknown("no hwvariant= on the kernel command line");
     for (const std::string &v : values)

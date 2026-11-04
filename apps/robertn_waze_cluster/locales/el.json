@@ -23,6 +23,7 @@
     "Status: {0}": "Κατάσταση: {0}",
     "Connecting…": "Γίνεται σύνδεση…",
     "Removed after restart": "Καταργείται μετά την επανεκκίνηση",
+    "Removed — head unit kept restarting": "Καταργήθηκε — η μονάδα επανεκκινούνταν συνεχώς",
     "Patched after restart": "Εφαρμόζεται μετά την επανεκκίνηση",
     "Removing patch…": "Κατάργηση διόρθωσης…",
     "Patching…": "Εφαρμογή διόρθωσης…",
