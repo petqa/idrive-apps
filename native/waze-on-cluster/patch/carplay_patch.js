@@ -64,6 +64,7 @@ var crypto = require('crypto');
 var path = require('path');
 var locator = require('./carplay_locate.js');
 var headUnit = require('./head_unit.js');
+var record = require('./patch_record.js');
 
 /* Builds proven as shipped, by GNU build-id. A first edit of one needs the
  * whole file to be the shipped one, and anything else counts as modified. A
@@ -339,9 +340,9 @@ function otherBuild(cur, orig) {
 
 /* The backup, checked for a restore without the locator, so a binary any
  * version of this tool patched can be restored: its SHA-256 and GNU build-id
- * are the recorded ones (each when recorded). { buf, hash, meta, other } or
- * { err }; other says why `cur` is not the backup's build (which writing the
- * backup whole would replace), null when it is. */
+ * are the recorded ones (each when recorded). { buf, hash, meta (the record,
+ * or null), other } or { err }; other says why `cur` is not the backup's
+ * build (which writing the backup whole would replace), null when it is. */
 function trustedBackup(target, cur) {
     var orig, meta = null;
     try { orig = fs.readFileSync(backupPath(target)); } catch (e) { return { err: 'no backup' }; }
@@ -349,7 +350,7 @@ function trustedBackup(target, cur) {
     var hash = sha256(orig), id = locator.buildId(orig);
     if (meta && meta.sha256_original && meta.sha256_original !== hash) return { err: 'sha256 ' + hash + ' != recorded ' + meta.sha256_original };
     if (meta && meta.buildId && id && meta.buildId !== id) return { err: 'build-id ' + id + ' != recorded ' + meta.buildId };
-    return { buf: orig, hash: hash, meta: !!meta, other: otherBuild(cur, orig) };
+    return { buf: orig, hash: hash, meta: meta, other: otherBuild(cur, orig) };
 }
 
 /* What a revert of `cur` (classified as `c`) writes, without --force:
@@ -444,7 +445,8 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
         put(resText, o, (wantRes ? resWant : orig).slice(o, o + 8));
     });
 
-    if (changed.length === 0) { process.stdout.write('nothing to do; already in the requested state\n'); return; }
+    var rec = { patched: true, proven: !!PROVEN[loc.buildId] };
+    if (changed.length === 0) { process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(target, rec); return; }
 
     /* The edited image must read as exactly the requested state, at the same
      * sites, changed only in the edit regions, before it is written. */
@@ -463,6 +465,7 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
     writeInPlace(target, out);
     var after = readTarget(target);
     if (!after.equals(out)) die('post-write verification failed: ' + target + ' does not hold the edited bytes; restore from ' + bak);
+    record.ensure(target, rec);
     process.stdout.write('patched OK. sha256 now ' + sha256(after) + '\n');
     process.stdout.write('revert:  carplay_patch.js revert --target ' + target + ' --yes\n');
 }
@@ -477,7 +480,7 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
 function cmdRevert(target, yes, force, dropBackup) {
     function drop() {
         if (!dropBackup) return;
-        [bak, metaPath(target), bak + '.tmp', metaPath(target) + '.tmp'].forEach(function (f) {
+        [bak, metaPath(target), bak + '.tmp', metaPath(target) + '.tmp', record.recordPath(target)].forEach(function (f) {
             try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') die('dropping ' + f + ': ' + e.message); }
         });
         process.stdout.write('backup dropped\n');
@@ -488,7 +491,7 @@ function cmdRevert(target, yes, force, dropBackup) {
     try { p = restorePlan(target, cur, classify(cur)); } catch (e) { p = { err: e.message }; }
     if (p.err) die('backup ' + bak + ' is not a verified original (' + p.err + '); refusing to restore it');
     var b = p.b, orig = b.buf;
-    if (cur.equals(orig)) { process.stdout.write('already at the original; nothing to do\n'); drop(); return; }
+    if (cur.equals(orig)) { process.stdout.write('already at the original; nothing to do\n'); record.ensure(target, { patched: false }); drop(); return; }
     /* Another build (a firmware update replaced carplay and left the old
      * backup behind): restoring would downgrade it. */
     if (b.other && !force) {
@@ -497,12 +500,13 @@ function cmdRevert(target, yes, force, dropBackup) {
             '\n  Pass --force only if you are sure this backup is the right original for it.');
     }
     var regionWise = p.regionWise && !force, out = regionWise ? p.out : orig;
-    if (regionWise && out.equals(cur)) { process.stdout.write('nothing to do: none of the edits is in it; other changes kept\n'); drop(); return; }
+    if (regionWise && out.equals(cur)) { process.stdout.write('nothing to do: none of the edits is in it; other changes kept\n'); record.ensure(target, { patched: false }); drop(); return; }
     process.stdout.write('About to restore ' + (regionWise ? 'the edited regions of ' : '') + target + ' from ' + bak + ' (sha256 ' + b.hash + ')\n');
     if (!yes) die('pass --yes to proceed');
     writeInPlace(target, out);
     var after = readTarget(target), ca = regionWise ? classify(after) : null;
     if (!after.equals(out) || (ca && EDITS.some(function (e) { return !ca.ok || ca[e].state !== 'original'; }))) die('restore verification failed');
+    record.ensure(target, { patched: false });
     process.stdout.write(after.equals(orig) ? 'restored OK. sha256 now ' + b.hash + '\n'
         : 'restored the edited regions; changes outside them kept. sha256 now ' + sha256(after) + '\n');
     if (dropBackup) drop();
@@ -596,4 +600,6 @@ function main() {
     else { process.stderr.write('usage: carplay_patch.js status|probe|apply|revert|verify [--target <file>] [--panel high|mid] [--capture <fifo> | --sink <url>] [--res WxH|stock] [--safe WxH+X+Y|full] [--unproven] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-main();
+module.exports = { trustedBackup: trustedBackup, PROVEN: PROVEN };
+
+if (require.main === module) main();

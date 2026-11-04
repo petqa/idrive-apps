@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Robert Nisipeanu
 [Unit]
-Description=waze-on-cluster boot check: restore the original aapd before it starts if the Android Auto patch crash-loops
+Description=waze-on-cluster boot check: restore the original aapd before it starts if the Android Auto patch keeps the head unit from starting
 RequiresMountsFor=/var/opt
 After=local-fs.target
 # aapd.service (WantedBy=late.target, after multi-user.target) starts only
@@ -9,22 +9,19 @@ After=local-fs.target
 Before=aapd.service
 
 [Service]
-# As waze-on-cluster-boot.service does for carplay: at the crash threshold,
-# or when it cannot save this boot's record, it remounts / read-write only to
-# run the vetted aapd_patch.js revert of a restorable patch, then read-only
-# again (PATCH.md "Boot recovery"). Otherwise it counts the previous boot,
-# arms this one and exits in about a second.
+# As waze-on-cluster-boot.service does for carplay: it records a boot that
+# starts a patched aapd and, at the threshold or when it cannot save that
+# record, remounts / read-write only to write the verified aapd and
+# aapd.conf back, then read-only again (PATCH.md "Boot recovery").
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=-/usr/bin/node /var/opt/waze-on-cluster/current/recovery.js boot aapd
-# Every command a restore runs is bounded, so it ends within 111 s
-# (recovery.js BOOT_BOUND_MS: up to 20 s for the other boot step's restore,
-# then RESTORE_BOUND_MS), inside the start timeout. A stop
-# mid-restore lets it finish, inside the stop timeout, so / is not left
-# writable; KillMode=mixed signals only the step, not its mount/revert
-# children.
-TimeoutStartSec=120
-TimeoutStopSec=120
+# The step exits by 56 s whatever hangs (recovery.js BOOT_EXIT_MS), inside
+# the start timeout. A stop mid-restore lets it finish, inside the stop
+# timeout, so / is not left writable; KillMode=mixed signals only the step,
+# not its mount children.
+TimeoutStartSec=75
+TimeoutStopSec=75
 KillMode=mixed
 StandardOutput=journal
 StandardError=journal

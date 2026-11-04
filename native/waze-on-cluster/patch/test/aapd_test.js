@@ -467,10 +467,12 @@ async function socketTests() {
         spaced.aa.runDpi === null && marker(t, 'aa-pending').run === null, JSON.stringify(spaced.aa));
 
     /* Restart head unit: once, then refused, and refused again by a new patchd within 10 min. */
+    fs.writeFileSync(t.env.WOC_BOOT_ID, 'boot-R\n');
     p.send({ cmd: 'reboot' });
     var rb = await p.next(function (m) { return m.ev === 'reboot-reply'; });
     for (var i = 0; i < 250 && calls(t).indexOf('reboot') < 0; i++) await sleep(20);
     ok('reboot: a pending Android Auto change is enough; one reboot', rb.ok === true && calls(t).filter(function (l) { return l === 'reboot'; }).length === 1, JSON.stringify(rb));
+    ok('reboot: the boot it was asked in is recorded for boot recovery', fs.readFileSync(path.join(t.d, 'var', 'restart-requested'), 'utf8') === 'boot-R\n');
     p.send({ cmd: 'reboot' });
     rb = await p.next(function (m) { return m.ev === 'reboot-reply'; });
     ok('reboot: a second request is refused while the first runs', rb.ok === false && /already in progress/.test(rb.reason), JSON.stringify(rb));
@@ -494,6 +496,7 @@ async function socketTests() {
     rb = await pf.next(function (m) { return m.ev === 'reboot-reply' && m.ok === false; });
     var rec = JSON.parse(fs.readFileSync(path.join(f.d, 'var', 'reboots.json'), 'utf8')).at;
     ok('reboot: a failed reboot takes out its own record only, and can be asked again', rec.length === 0 || (rec.length === 1 && rec[0] === older), JSON.stringify(rec));
+    ok('reboot: a failed reboot leaves no restart for boot recovery', !fs.existsSync(path.join(f.d, 'var', 'restart-requested')));
     pf.send({ cmd: 'reboot' });
     rb = await pf.next(function (m) { return m.ev === 'reboot-reply'; });
     ok('reboot: after a failed reboot a new request is accepted', rb.ok === true, JSON.stringify(rb));
@@ -635,23 +638,34 @@ async function socketTests() {
 
 /* ---- boot recovery for aapd ---- */
 var recovery = require('../recovery.js');
-var AT = recovery.TARGETS.aapd;
+var record = require('../patch_record.js');
+/* The aapd watcher on a patched aapd of ours (its backup and record) in a
+ * folder of its own, with systemd and the restore stubbed. */
 function fakeRec(opts) {
-    var d = fs.mkdtempSync(path.join(os.tmpdir(), 'woc-aarec-'));
+    var d = opts.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'woc-aarec-'));
     dirs.push(d);
+    var t = recovery.targets({ state: path.join(d, 'boot-recovery.json'), sock: path.join(d, 'patch.sock'), carplay: path.join(d, 'carplay'),
+        aapd: path.join(d, 'aapd'), aapdConf: path.join(d, 'aapd.conf') }).aapd;
+    if (!opts.dir) {
+        fs.writeFileSync(t.target + '.woc-orig', 'aapd\n');
+        fs.writeFileSync(t.target + '.woc-orig.json', JSON.stringify({ sha256_original: sha(Buffer.from('aapd\n')) }));
+        fs.writeFileSync(t.target, 'patched aapd\n');
+        record.write(t.target, { patched: true, proven: true });
+    }
+    if (opts.killed) fs.writeFileSync(t.killed, opts.killed + '\n');
     var now = 0, ev = [], info = opts.info || { state: 'active', run: 'r1', pid: 1 };
     var rec = new recovery.Recovery({
-        target: AT, statePath: path.join(d, 'aa.json'), bootId: opts.boot || 'B1', threshold: 2, healthyMs: 60000,
-        classify: function (cb) { ev.push('classify'); cb({ ok: true, patchActive: true, restorable: true }); },
-        restore: function (cb) { ev.push('restore'); cb(null); },
+        target: t, bootId: opts.boot || 'B1', healthyMs: 60000,
+        restore: function (f, cb) { ev.push('restore'); cb(null, 'restored'); },
         probe: function (cb) { cb(rec.info); }, systemState: function (cb) { cb('running'); },
-        start: function (cb) { ev.push('start'); cb(null); }, mark: opts.mark || function () { return null; },
-        hasBackup: function () { return true; }, alive: function () { return false; }, killed: function () { return opts.killed || ''; },
+        start: function (cb) { ev.push('start'); cb(null); },
+        alive: function () { return false; },
         recmgrLoaded: function (n) { ev.push('recmgr ' + n); return opts.recmgr !== false; },
         lock: { tryAcquire: function () { return true; }, release: function () {} }, now: function () { return now; }, log: function () {},
     });
     rec.info = info;
     rec.ev = ev;
+    rec.dir = d;
     rec.advance = function (ms) { now += ms; };
     return rec;
 }
@@ -686,11 +700,8 @@ async function recoveryTests() {
     var st = JSON.parse(fs.readFileSync(b.statePath, 'utf8'));
     ok('aapd crashes: the boot\'s starts are on disk', st.starts && st.starts.n === 3, JSON.stringify(st));
 
-    var c = fakeRec({});
-    await new Promise(function (r) { c.startBoot(r); });
-    c.info = { state: 'failed', result: 'signal', code: '2', status: '9', run: 'pk', pid: 0 };
     var k = fakeRec({ killed: 'pk' });
-    k.info = c.info;
+    k.info = { state: 'failed', result: 'signal', code: '2', status: '9', run: 'pk', pid: 0 };
     await new Promise(function (r) { k.startBoot(r); });
     k.advance(6000);
     var z = await tick(k);
@@ -708,25 +719,22 @@ async function recoveryTests() {
      * aapd; a switch-off (mark running) counts nothing. */
     var d = fakeRec({ boot: 'B1' });
     await new Promise(function (r) { d.startBoot(r); });
-    var d2 = fakeRec({ boot: 'B2', mark: function () { return 'failed'; } });
-    d2.statePath = d.statePath;
-    var r2 = await new Promise(function (r) { d2.startBoot(r); });
-    var d3 = fakeRec({ boot: 'B3', mark: function () { return 'failed'; } });
-    d3.statePath = d.statePath;
-    var r3 = await new Promise(function (r) { d3.startBoot(r); });
+    fs.writeFileSync(path.join(d.dir, 'shutdown-aapd'), 'B1 failed crash\n');
+    var r2 = await new Promise(function (r) { fakeRec({ boot: 'B2', dir: d.dir }).startBoot(r); });
+    fs.writeFileSync(path.join(d.dir, 'shutdown-aapd'), 'B2 failed crash\n');
+    var r3 = await new Promise(function (r) { fakeRec({ boot: 'B3', dir: d.dir }).startBoot(r); });
     ok('boot step: two boots whose aapd failed restore before aapd starts', r2.action === 'armed' && r3.action === 'restored', JSON.stringify([r2, r3]));
     var s1 = fakeRec({ boot: 'S1' });
     await new Promise(function (r) { s1.startBoot(r); });
-    var s2 = fakeRec({ boot: 'S2', mark: function () { return 'running'; } });
-    s2.statePath = s1.statePath;
-    var rs = await new Promise(function (r) { s2.startBoot(r); });
+    fs.writeFileSync(path.join(s1.dir, 'shutdown-aapd'), 'S1 running\n');
+    var rs = await new Promise(function (r) { fakeRec({ boot: 'S2', dir: s1.dir }).startBoot(r); });
     ok('boot step: a switch-off within seconds (mark running) is no failure', rs.action === 'armed' && rs.fails === 0, JSON.stringify(rs));
 
     /* The real boot step on copies: the restore before aapd, / read-only. */
     var t = patchdUnit();
     patcher(t, ['apply', '--yes']);
     var state = path.join(t.d, 'var', 'boot-recovery.json');
-    fs.writeFileSync(path.join(t.d, 'var', 'aa-boot-recovery.json'), JSON.stringify({ fails: 1, arm: { boot: 'old', crashes: 1 } }));
+    fs.writeFileSync(path.join(t.d, 'var', 'aa-boot-recovery.json'), JSON.stringify({ fails: 1, unknown: 0, arm: { boot: 'old', crashes: 1 } }));
     fs.writeFileSync(path.join(t.d, 'bootid'), 'new\n');
     var env = Object.assign({}, t.env, { WOC_RECOVERY_STATE: state, WOC_BOOT_ID: path.join(t.d, 'bootid') });
     var res = cp.spawnSync(process.execPath, [path.join(PATCH, 'recovery.js'), 'boot', 'aapd'], { env: env, encoding: 'utf8', timeout: 60000 });
@@ -735,10 +743,22 @@ async function recoveryTests() {
     var cpState = fs.existsSync(state);
     ok('real boot step: carplay\'s counter untouched', !cpState);
 
+    /* A restore cut short after aapd (aapd.conf still patched): patchd
+     * reports the restore, and an install does not apply the patch again. */
+    var q = patchdUnit();
+    patcher(q, ['apply', '--yes']);
+    var patchedConf = fs.readFileSync(q.conf);
+    var qr = cp.spawnSync(process.execPath, ['-e', 'var r = require(process.argv[1]); r.restoreTarget(r.TARGETS.aapd, true, 2, function (e, o) { process.stdout.write(String(e || o)); });',
+        path.join(PATCH, 'recovery.js')], { env: Object.assign({}, q.env, { WOC_RECOVERY_STATE: path.join(q.d, 'var', 'boot-recovery.json') }), encoding: 'utf8' });
+    fs.writeFileSync(q.conf, patchedConf);
+    var qh = hook(q, 'activate');
+    ok('a restore that left aapd.conf patched: an install leaves aapd off and says why', qr.stdout === 'restored' && sha(q.bin) === sha(SRC) &&
+        /boot recovery removed the patch after 2 failed head-unit starts/.test((qh.result.aa || {}).status || ''), qr.stdout + qr.stderr + ' ' + JSON.stringify(qh.result));
+
     /* The boot step's SIGTERM waits for a restore in progress. */
     var u = patchdUnit();
     patcher(u, ['apply', '--yes']);
-    fs.writeFileSync(path.join(u.d, 'var', 'aa-boot-recovery.json'), JSON.stringify({ fails: 2, arm: null }));
+    fs.writeFileSync(path.join(u.d, 'var', 'aa-boot-recovery.json'), JSON.stringify({ fails: 2, unknown: 0, arm: null }));
     fs.writeFileSync(u.env.WOC_MOUNT, '#!/bin/sh\nsleep 1\ncase "$*" in *rw*) echo "/dev/root / ext4 rw 0 0" > "' + u.mounts + '";; *) echo "/dev/root / ext4 ro 0 0" > "' + u.mounts + '";; esac\n');
     var envU = Object.assign({}, u.env, { WOC_RECOVERY_STATE: path.join(u.d, 'var', 'boot-recovery.json'), WOC_BOOT_ID: path.join(u.d, 'bootid') });
     fs.writeFileSync(path.join(u.d, 'bootid'), 'x\n');
@@ -757,8 +777,8 @@ async function recoveryTests() {
         var cpr = cp.spawnSync(process.execPath, [path.join(PATCH, 'carplay_patch.js'), 'apply', '--panel', 'high', '--target', both.carplay, '--yes'], { encoding: 'utf8' });
         fs.writeFileSync(both.env.WOC_MOUNT, '#!/bin/sh\nsleep 1\ncase "$*" in *rw*) echo "/dev/root / ext4 rw 0 0" > "' + both.mounts + '";; *) echo "/dev/root / ext4 ro 0 0" > "' + both.mounts + '";; esac\n');
         var bv = path.join(both.d, 'var');
-        fs.writeFileSync(path.join(bv, 'boot-recovery.json'), JSON.stringify({ fails: 2, arm: null }));
-        fs.writeFileSync(path.join(bv, 'aa-boot-recovery.json'), JSON.stringify({ fails: 2, arm: null }));
+        fs.writeFileSync(path.join(bv, 'boot-recovery.json'), JSON.stringify({ fails: 2, unknown: 0, arm: null }));
+        fs.writeFileSync(path.join(bv, 'aa-boot-recovery.json'), JSON.stringify({ fails: 2, unknown: 0, arm: null }));
         fs.writeFileSync(path.join(both.d, 'bootid'), 'b\n');
         var be = Object.assign({}, both.env, { WOC_RECOVERY_STATE: path.join(bv, 'boot-recovery.json'), WOC_BOOT_ID: path.join(both.d, 'bootid') });
         var ends = await Promise.all(['carplay', 'aapd'].map(function (n) {
@@ -774,19 +794,22 @@ async function recoveryTests() {
     }
 
     /* A boot cut off with no record of its own counts for the service
-     * that crashed in it, not for the other. */
-    [[1, 0], [0, 1]].forEach(function (c) {
+     * that crashed in it, not for the other; with no crash of either it is
+     * unknown for carplay (power lost), and the second such boot in a row
+     * counts one. */
+    [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 1]].forEach(function (c) {
         var x = patchdUnit();
         var vs = path.join(x.d, 'var');
         fs.writeFileSync(x.carplay + '.woc-orig', 'x');
-        fs.writeFileSync(path.join(vs, 'boot-recovery.json'), JSON.stringify({ fails: 0, arm: { boot: 'old', crashes: 0 } }));
-        fs.writeFileSync(path.join(vs, 'aa-boot-recovery.json'), JSON.stringify({ fails: 0, prev: null, arm: { boot: 'old', crashes: c[0] } }));
+        fs.writeFileSync(path.join(vs, 'boot-recovery.json'), JSON.stringify({ fails: 0, unknown: c[3], arm: { boot: 'old', crashes: 0 } }));
+        fs.writeFileSync(path.join(vs, 'aa-boot-recovery.json'), JSON.stringify({ fails: 0, unknown: 0, prev: null, arm: { boot: 'old', crashes: c[0] } }));
         fs.writeFileSync(path.join(x.d, 'bootid'), 'new\n');
         var e = Object.assign({}, x.env, { WOC_RECOVERY_STATE: path.join(vs, 'boot-recovery.json'), WOC_BOOT_ID: path.join(x.d, 'bootid') });
         cp.spawnSync(process.execPath, [path.join(PATCH, 'recovery.js'), 'boot', 'carplay'], { env: e, encoding: 'utf8', timeout: 30000 });
         var cst = JSON.parse(fs.readFileSync(path.join(vs, 'boot-recovery.json'), 'utf8'));
-        ok(c[0] ? 'an unrecorded end after aapd crashed in that boot is not carplay\'s failure' : 'an unrecorded end with no aapd crash still counts for carplay (power lost)',
-            cst.fails === c[1] && cst.arm.boot === 'new', JSON.stringify(cst));
+        ok(c[0] ? 'an unrecorded end after aapd crashed in that boot is not carplay\'s failure'
+            : c[3] ? 'a second unrecorded end in a row with no aapd crash counts one for carplay' : 'a first unrecorded end with no aapd crash is unknown for carplay (power lost)',
+            cst.fails === c[1] && cst.unknown === c[2] && cst.arm.boot === 'new', JSON.stringify(cst));
     });
 
     /* shutdown_mark.sh: aapd SIGKILLed is stopped (no crash), as for its
@@ -800,16 +823,16 @@ async function recoveryTests() {
     var mr = cp.spawnSync('sh', [path.join(PATCH, 'shutdown_mark.sh')], { env: Object.assign({}, process.env, { WOC_STATE_DIR: path.join(md, 'state'),
         WOC_BOOT_ID: path.join(md, 'boot_id'), WOC_SYSTEMCTL: path.join(md, 'systemctl'), WOC_MARK_WAIT: '2' }) });
     ok('shutdown mark: a SIGKILLed aapd is stopped, a SIGKILLed carplay (no drop-in) failed', mr.status === 0 &&
-        fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8') === 'B stopped\n' && fs.readFileSync(path.join(md, 'state', 'shutdown'), 'utf8') === 'B failed\n');
+        /^B stopped up \d+\n$/.test(fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8')) && /^B failed up \d+\n$/.test(fs.readFileSync(path.join(md, 'state', 'shutdown'), 'utf8')));
     fs.writeFileSync(path.join(md, 'systemctl'), '#!/bin/sh\nprintf "ActiveState=failed\\nResult=signal\\nExecMainCode=2\\nExecMainStatus=90\\n"\n');
     cp.spawnSync('sh', [path.join(PATCH, 'shutdown_mark.sh')], { env: Object.assign({}, process.env, { WOC_STATE_DIR: path.join(md, 'state'),
         WOC_BOOT_ID: path.join(md, 'boot_id'), WOC_SYSTEMCTL: path.join(md, 'systemctl'), WOC_MARK_WAIT: '2' }) });
-    ok('shutdown mark: another signal end of aapd is failed', fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8') === 'B failed\n');
+    ok('shutdown mark: another signal end of aapd is failed', /^B failed up \d+\n$/.test(fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8')));
     fs.writeFileSync(path.join(md, 'state', 'shutdown-aapd'), 'B stopped\n');
     fs.writeFileSync(path.join(md, 'systemctl'), '#!/bin/sh\nprintf "ActiveState=failed\\nResult=oom-kill\\nExecMainCode=2\\nExecMainStatus=9\\n"\n');
     cp.spawnSync('sh', [path.join(PATCH, 'shutdown_mark.sh')], { env: Object.assign({}, process.env, { WOC_STATE_DIR: path.join(md, 'state'),
         WOC_BOOT_ID: path.join(md, 'boot_id'), WOC_SYSTEMCTL: path.join(md, 'systemctl'), WOC_MARK_WAIT: '2' }) });
-    ok('shutdown mark: an oom-killed aapd (status 9) is failed', fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8') === 'B failed\n');
+    ok('shutdown mark: an oom-killed aapd (status 9) is failed', /^B failed up \d+\n$/.test(fs.readFileSync(path.join(md, 'state', 'shutdown-aapd'), 'utf8')));
 
     ok('the units\' timeouts cover the restore bound', [/TimeoutStartSec=(\d+)/, /TimeoutStopSec=(\d+)/].every(function (re) {
         return Number(re.exec(fs.readFileSync(path.join(PATCH, '..', 'systemd', 'waze-on-cluster-aa-boot.service'), 'utf8'))[1]) * 1000 > recovery.BOOT_BOUND_MS + 5000;

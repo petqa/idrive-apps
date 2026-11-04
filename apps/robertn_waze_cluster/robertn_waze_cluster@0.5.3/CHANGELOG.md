@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+When boot recovery removed a patch because the head unit kept failing to
+start with it, its Status row reads `Removed after errors`, also with part
+of the patch left, until its Patch button applies the patch again. On a
+head unit that refuses the tool, `Not supported on this car` comes first.
+Needs waze-on-cluster 0.8.3 to show it.
+
 ## 0.5.2
 
 On a head unit that refuses the tool (HIGH F, or a variant it cannot

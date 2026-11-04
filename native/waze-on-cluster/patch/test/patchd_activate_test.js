@@ -161,7 +161,7 @@ function headUnitStart() {
 }
 function fresh(buf) {
     stops();
-    [PENDING, RUNNING, BAK, TGT + '.woc-orig.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
+    [PENDING, RUNNING, BAK, TGT + '.woc-orig.json', TGT + '.woc-patch.json'].forEach(function (f) { try { fs.unlinkSync(f); } catch (e) {} });
     fs.writeFileSync(TGT, buf, { mode: 0o755 });
     runs(TGT);
 }
@@ -385,6 +385,22 @@ async function main() {
     headUnitStart();
     await daemonStatus();
     ok('recovery\'s link: removed by patchd once nothing runs it, / read-only', !fs.existsSync(RUNNING) && ro());
+
+    /* Boot recovery's own restore at its threshold (the boot step's, nothing
+     * running): patchd reports it, and an install leaves the patch off. */
+    fresh(SRCBUF);
+    hook('activate');
+    headUnitStart();
+    stops();
+    r = cp.spawnSync(process.execPath, ['-e', 'var r = require(process.argv[1]); r.restoreTarget(r.TARGETS.carplay, true, 2, function (e, o) { process.stdout.write(String(e || o)); });',
+        path.join(__dirname, '..', 'recovery.js')], { env: ENV, encoding: 'utf8' });
+    ok('boot recovery\'s restore: the original, / read-only', r.stdout === 'restored' && disk() === sha(SRCBUF) && ro(), r.stdout + r.stderr);
+    st = await daemonStatus();
+    ok('boot recovery\'s restore: patchd reports the original and the failed starts it was made at', st.state === 'original' && st.recovered === 2 && !st.pending, JSON.stringify(st));
+    before = disk();
+    r = hook('activate');
+    ok('boot recovery\'s restore: an install leaves the patch off, and says why', r.code === 0 && disk() === before && marker() === null &&
+        /boot recovery removed the patch after 2 failed head-unit starts/.test(r.result.status || ''), JSON.stringify(r.result));
 
     /* A write window cut short between keeping the link and the patcher's
      * rename leaves a link that is carplay's own file: patchd removes it as

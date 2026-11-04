@@ -467,7 +467,9 @@ the whole backup there too. A backup without a record (an older release's)
 is written whole only when the locator reads it as the pristine build or it
 has the target's size, `--force` or not. `status` prints `restorable: yes`
 when the revert would change the target, else `no` with why. Every write is
-an atomic rename.
+an atomic rename. After each write to the target the patcher records it in
+`<target>.woc-patch.json` for boot recovery ("Boot recovery"), and a
+removal drops that record with the backup.
 
 ## Android Auto
 
@@ -656,97 +658,220 @@ and no head-unit restart starts meanwhile.
 
 ## Boot recovery
 
-On a head unit that refuses our parts ("Supported head units"), with a
-backup of ours, the boot step classifies the target first, whatever its
-counter, and restores it when `status` reads `restorable: yes`, as below.
-The log says `head unit: ...; restoring the original carplay` and the
-result.
+On a head unit that refuses our parts ("Supported head units"), a patch of
+ours (by the patch record below, or a binary of our backup's build the
+record does not describe, or an aapd.conf that still differs from its
+verified backup) is restored at the boot step before CarPlay or aapd
+starts, whatever the counter, with the same verified restore; the log
+says `head unit: ...; restoring the original carplay` and the result. Where
+nothing is restorable `/` is not remounted. A head unit that runs our parts
+is not touched by this.
 
-A CarPlay crash reboots the head unit with the patched binary still on
-disk: a boot loop with no HMI to turn the map off. A crash (a core dump, or
-a watchdog timeout) fails `carplay.service`, so its `OnFailure=` restarts
-the head unit ("Activation"), and the core dump goes to crashhandler. Its
-`[Whitelist]` is in `/etc/crashhandler-restartlist.conf` (the default of
+A patch can keep the head unit from starting: the patched CarPlay crashes,
+or it makes another process crash, and the head unit restarts with the
+patched binary still on disk, every few seconds, with no HMI to turn the map
+off. A CarPlay crash (a core dump, or a watchdog timeout) fails
+`carplay.service`, so its `OnFailure=` restarts the head unit
+("Activation"), and the core dump goes to crashhandler. Its `[Whitelist]` is
+in `/etc/crashhandler-restartlist.conf` (the default of
 `Restart/RestartListPath`, which `/etc/crashhandler.ini` does not set), a
 list of its own, not recmgr's, and the firmware's has no `carplay`; the
-recmgr entry and the drop-in do not prevent it; the drop-in adds SIGKILL
-to the exits that count as successful, not a core dump. Boot recovery
-restores the original binary after repeated crashes, before CarPlay
-starts.
+recmgr entry and the drop-in do not prevent it; the drop-in adds SIGKILL to
+the exits that count as successful, not a core dump. Another process's
+failure restarts the head unit through recmgr. Boot recovery counts the
+starts that fail with the patch on disk, whatever crashed, and restores the
+original binary before CarPlay starts.
 
-**How the head unit goes down.** recmgr (and crashhandler, for a core dump)
-asks the NodeStateManager for a fast shutdown; it runs
-`var-opt-ro.service`, which syncs and remounts `/var/opt` read-only, and the
-IOC then resets the SoC. systemd stops no service: there is no SIGTERM, no
-`ExecStop` and no `shutdown.target`. A switch-off takes the same path. So no
-service sees a crash reboot, or a switch-off, as a stop.
+**How the head unit goes down.** recmgr and crashhandler ask the
+NodeStateManager for a fast shutdown; it runs `var-opt-ro.service`, which
+syncs and remounts `/var/opt` read-only, and the IOC then resets the SoC.
+systemd stops no service: there is no SIGTERM, no `ExecStop` and no
+`shutdown.target`. A switch-off takes the same path. What tells them apart
+is the restart record each of recmgr and crashhandler writes when it asks
+for the restart, `/var/opt/public/sin/recmgr/restartInfo.xml` and
+`/var/opt/public/sin/crashhandler/restartInfo.xml`, which each deletes when
+it starts at the next boot. Restart head unit asks the NodeStateManager for
+a normal restart, which runs `var-opt-ro.service` and writes no restart
+record; a `systemctl reboot` is an orderly systemd shutdown, which stops
+every service and does not run `var-opt-ro.service`.
 
-Android Auto has the same recovery, with a counter of its own: an aapd crash
-reboots the head unit only until the crash handler and recmgr load their
-`aapd` entries, and the sections below apply to aapd as to CarPlay, with
-`aapd.service`, `/var/opt/waze-on-cluster/aa-boot-recovery.json`, the
-shutdown record `shutdown-aapd` and the boot step
-`waze-on-cluster-aa-boot.service` (`recovery.js boot aapd`,
-`Before=aapd.service`). The restore is `aapd_patch.js revert`, which puts
-back aapd and aapd.conf. A SIGKILL of aapd ends it failed with
-`Result=signal`, `ExecMainCode=2`, `ExecMainStatus=9`; that is no crash,
-and the watcher starts aapd again as after a crash. The shutdown record
-writes such an end as `stopped`, so the boot step does not count it
-either. The watcher follows
-aapd only on a unit that has it. Neither counter, nor a restore of one,
-touches the other service. A boot that ended with no record of a service
-(no crash seen, no shutdown record, not healthy for 60 s) counts for it
-only when the other service recorded no crash in that boot: a crash of the
-other ended it, and counts there (`prev` keeps that boot's record after
-its boot step has counted it). So a reset with nothing recorded, a power
-cut, or a crash the unit reset for before the watcher saw it, counts for
-both services: each errs towards restoring its original.
+The emulator, with the firmware's recmgr, crashhandler and NodeStateManager,
+showed: recmgr writes its record when a unit fails, before it asks for the
+restart; crashhandler writes its record just before its restart request
+(after up to 60 s waiting for a crash report there); both are on disk when
+`var-opt-ro.service` runs; each deletes its own record some 10 to 20 s
+into the next boot, after the boot step has run. What only the car can
+show: whether a record reaches the disk when the IOC resets the unit
+without `var-opt-ro.service` (crashhandler's fallback when the
+NodeStateManager does not take the restart), and the deletion's timing
+there against the boot step.
 
-**What is recorded.** `/var/opt/waze-on-cluster/boot-recovery.json`, written
-whole: a temporary file, fsync'd, renamed over it. A write that fails leaves
-the previous state as it was. It holds:
+Android Auto has the same recovery, with a counter of its own, and the
+sections below apply to aapd as to CarPlay, with `aapd.service`,
+`/var/opt/waze-on-cluster/aa-boot-recovery.json`, the shutdown record
+`shutdown-aapd` and the boot step `waze-on-cluster-aa-boot.service`
+(`recovery.js boot aapd`, `Before=aapd.service`). The restore puts back
+aapd and aapd.conf. A SIGKILL of aapd ends it failed with `Result=signal`,
+`ExecMainCode=2`, `ExecMainStatus=9`; that is no crash, and the watcher
+starts aapd again as after a crash. The shutdown record writes such an end
+as `stopped`, so the boot step does not count it either. The watcher
+follows aapd only on a unit that has it.
 
-- `fails`: crashes of the patched CarPlay since the last head-unit start in
-  which CarPlay ran and did not crash;
-- `arm`: this start's record, `{boot, crashes, confirmed, clean}`, kept
-  while our backup `<target>.woc-orig` exists;
-- `starts`: the CarPlay starts made this boot;
-- `ended`: the last CarPlay run whose end was handled.
+**What is recorded.**
 
-An `arm` written by 0.7.5 and earlier (`{boot, state}`) is read as the same
-record.
-
-`shutdown_mark.sh`, run by a drop-in for `var-opt-ro.service`
-(`50-waze-on-cluster.conf`) before `/var/opt` goes read-only, writes
-`<boot id> running|failed|stopped` to `/var/opt/waze-on-cluster/shutdown`
-from `carplay.service`'s `ActiveState` and `Result`; `failed` is any
-`Result` other than `success`. It writes nothing if `systemctl` does not
-answer within 3 s, and always exits 0, so it never holds up the remount.
-CarPlay is not a NodeStateManager shutdown client and nothing stops it at a
-shutdown, so a switch-off records `running`.
+- The patch record, `<target>.woc-patch.json` (`patch_record.js`), beside
+  the binary: `{patched, proven, ino, size, mtime}`, written by the
+  patcher after each write to the target (and by an `apply` or `revert`
+  with nothing to write when the file has changed since the record was
+  written, or there is none), by the restore below with `by: "recovery"`,
+  `at` and `fails` after failed starts, or `by: "refused"` and `at` on a
+  head unit that refuses our parts, and removed with the backup. It describes the target while its inode, size and
+  modification time are the recorded ones. `proven` is whether the
+  build is on the patcher's proven list (`PROVEN`, for aapd its one known
+  build).
+- `/var/opt/waze-on-cluster/boot-recovery.json`, written whole: a
+  temporary file, fsync'd, renamed over it, the folder fsync'd. A write
+  that fails leaves the previous state as it was. It holds:
+  - `fails`: failed patched starts and crashes of the patched CarPlay since
+    the last healthy one;
+  - `unknown`: patched starts in a row since then that ended with no
+    record;
+  - `arm`: this start's record, `{boot, at, patch, crashes, ran, confirmed,
+    clean}`, written before a patched CarPlay starts; `at` is when (ms
+    since the epoch), `patch` is `proven`, `unproven` or `unknown`, `ran`
+    that the watcher saw CarPlay running;
+  - `prev`: the last start counted;
+  - `starts`: the CarPlay starts made this boot;
+  - `ended`: the last CarPlay run whose end was handled.
+- The shutdown record, `/var/opt/waze-on-cluster/shutdown`, written by
+  `shutdown_mark.sh`, run by a drop-in for `var-opt-ro.service`
+  (`50-waze-on-cluster.conf`) before `/var/opt` goes read-only: `<boot id>
+  running|failed|stopped` from `carplay.service`'s `ActiveState` and
+  `Result` (`failed` is any `Result` other than `success`), followed by
+  ` crash` when a restart record of recmgr or crashhandler is there and
+  was written in this boot (its modification time, by `stat`, not before
+  `/proc/stat`'s `btime` and not after now, a second of slack each way),
+  ` ran` when systemd started the service in that boot
+  (`ExecMainStartTimestampMonotonic` above 0), and ` up <s>`, the boot's
+  system uptime. It writes nothing for a service
+  `systemctl` does not answer for within 3 s, and always exits 0, so it
+  never holds up the remount. `var-opt-ro.service` syncs `/var/opt` next.
+- `/var/opt/waze-on-cluster/restart-requested`: the boot `patchd`'s
+  `reboot` was asked in, written before the reboot runs.
 
 **The boot step** (`recovery.js boot`, `waze-on-cluster-boot.service`, a
 oneshot wanted by `multi-user.target`, `Before=carplay.service`, which
-`late.target` starts after `multi-user.target`). The previous start adds its
-`crashes`, or one when its shutdown record says `failed` and none were seen.
-With none, it clears the counter if CarPlay ran 60 s continuously, keeps it
-if CarPlay was running or stopped at the shutdown, or was stopped by an
-orderly shutdown (SIGTERM while the system stops), and otherwise adds one (it
-ended with no record, e.g. power lost). Without our backup it clears the
-counter and exits; below the threshold (2) it arms this start and exits.
-When it cannot save the arm, it restores at once, whatever the count.
-Neither reads the 3.5 MB binary, so CarPlay waits about the time Node takes
-to start. At the threshold it classifies the binary and restores the
-original before CarPlay starts, in seconds. Every command a restore runs is
-bounded, so the restore ends within 91 s, after at most 20 s waiting for
-the other boot step's restore (the two run side by side and share the
-remount lock): 111 s in all. CarPlay waits for the step 120 s
-at most (`TimeoutStartSec`), and that only when those commands hang. CarPlay
-does not require the step: it starts when the step has exited, failed or
-timed out. The step exits 0 whatever happens, and it is in recmgr's lists, so
-a timeout does not reboot the unit. Its `RequiresMountsFor=/var/opt` adds no
+`late.target` starts after `multi-user.target`). It reads the state, the
+previous start's shutdown record, `restart-requested`, the other service's
+state, whether our backup exists, the patch record, a `stat` of the
+binary and, with no shutdown record, a `stat` of the two restart records,
+and nothing else; it reads the binary only to restore it.
+
+A start counts as failed only on evidence of a crash. The evidence is the
+restart record recmgr or crashhandler writes when it asks for a head-unit
+restart (`restartInfo.xml`, above, deleted by each at its next start):
+the shutdown mark's ` crash` says it was there at the shutdown, and with no
+mark, the record itself stands in when it is still there at the next boot
+step and was written in the armed boot: its modification time at or after
+`at`, before this boot's `btime` and not after now, each within a second of
+slack for the file system's clock. Whatever process
+it names counts: a patch can take another one down. Neither crashhandler's
+core dump folder (it also keeps dumps of processes on its whitelist, which
+restart nothing), NodeStateManager's last shutdown reason (kept inside
+NSM, reachable only over SOME/IP) nor a journal (it is volatile) serves.
+The previous start, when it was armed, counts in this order:
+
+| How it ended | `fails` | `unknown` |
+|---|---|---|
+| CarPlay crashed in it (seen by the watcher, or the shutdown record says `failed`) | + its crashes (at least 1) | 0 |
+| otherwise, CarPlay ran healthy (60 s without a break) | 0 | 0 |
+| CarPlay never ran in it (the shutdown record says `stopped` without ` ran`, the watcher never saw it running) | kept | kept |
+| Android Auto, patched in it, crashed in it | kept (counted for Android Auto) | 0 |
+| a restart recmgr or crashhandler recorded (` crash`, or its record with no mark) | + 1 | 0 |
+| a switch-off or an NSM restart after the healthy window (a shutdown record without ` crash` from a boot whose system uptime, `up`, is 60 s or more), or a restart the user asked for (`restart-requested` names it, or the watcher stopped while `shutdown.target` was queued) | kept | 0 |
+| no record: a power cut, a 12 V disconnect, a dealer tool, a restart whose records were lost, or a shutdown record without ` crash` from a boot shorter than the healthy window | kept, or + 1 when it is the second such start in a row | + 1, or 0 when it counted |
+
+A start with no record is unknown, not failed: one never removes a patch.
+Two in a row count one failure, so a loop that leaves no record (a reset
+before `var-opt-ro.service` runs and before recmgr's record reaches the
+disk, or a record the shutdown record missed) is still caught: one start
+later than a loop with records for a build outside the proven list, two
+starts later for a proven one. The cost is accepted: two short boots in a
+row with no record (two quick switch-offs, a dealer tool's or the IOC's
+resets) count one failure, which removes an unproven patch, or a proven
+one at the second such pair with no healthy boot between.
+
+Then, by the binary about to start:
+
+| On disk | The step |
+|---|---|
+| no backup of ours, or the patch record says original | clears the counter; arms nothing |
+| our patch, `fails` below the threshold | arms this start |
+| our patch, `fails` at the threshold | arms this start, restores the original |
+| this start's arm cannot be saved | restores the original at once |
+
+The threshold is 1 failed start for a build outside the proven list (`proven:
+false`; CarPlay's Patch button patches one with `--unproven`) and 2 for a
+proven build or a binary of the backup's build the record does not
+describe (`unknown`, an older release's patch). Only a healthy start
+clears the counter: a proven patch is restored after two failed starts, or
+crashes of the patched service, with no healthy start between them, the
+switch-offs, restarts asked for and starts it never ran in between counting
+nothing either way. A single crash restart of some BMW process within the
+window never removes it. A state written by 0.8.1 or earlier (no
+`unknown`) was counted by other rules, so its counts start again at 0. When both patches are on disk and a start fails with no crash
+of either recorded, it counts for both, each against its own threshold:
+nothing tells which patch made another process crash, and a loop costs the
+car its HMI where a restored patch costs one press of Patch. The crash of
+one counts for it alone.
+
+| Loop | unproven restored before the start | proven |
+|---|---|---|
+| the patched service crashes at start, or another process does, with records | 2nd | 3rd |
+| the same, every record lost | 3rd | 5th |
+
+60 s is the healthy window: past the head unit's own start-up, when its
+services come up and connect, and past the start of a CarPlay or Android
+Auto session of a phone already attached; a failure after it is the
+watcher's to see, as a crash of its own. A healthy start is the service
+running 60 s without a break, as the watcher sees it; the shutdown
+record's 60 s is the boot's system uptime (`/proc/uptime`), so a
+switch-off within 60 s of the head unit's start, with no restart record,
+counts as a start with no record.
+
+With nothing to restore the step's own work takes under 0.15 s; the rest
+of its time is Node's start-up. A restore reads the
+backup, checks it against the SHA-256 its record took when it was made (a
+backup without its record only when it is the shipped file of the proven
+build: carplay 22.28.3, aapd 22.39.3 and its aapd.conf, by the patchers'
+tables), and checks that the binary is the backup's build (the same size and GNU
+build-id, or, without a build-id, at most the patcher's bound of bytes
+apart); then, under the remount lock, with `/` read-write only for the
+write, it writes the backup whole to a temporary file with the binary's
+mode and owner, fsyncs it, renames it over the binary, fsyncs the folder,
+writes the patch record, removes the pending marker and remounts `/`
+read-only, checked. It refuses a backup that does not match its record:
+CarPlay starts as it is, the refusal is logged and the next start tries
+again. Over another build (a firmware update) it writes nothing and clears
+the counter. aapd.conf another file than its backup, or with a backup that
+does not match its record, is left while aapd is restored. A restore takes
+a second or two; every remount is bounded (10 s), and the step gives up at
+46 s whatever hangs (10 s waiting for the other boot step's restore, the two
+run side by side and share the remount lock, then the restore's bound) and
+exits by 56 s, after one bounded try to put `/` back read-only and
+releasing the lock. CarPlay waits for the step 75 s at most
+(`TimeoutStartSec`). CarPlay does
+not require the step: it starts when the step has exited, failed or timed
+out. The step exits 0 whatever happens, and it is in recmgr's lists, so a
+timeout does not reboot the unit. Its `RequiresMountsFor=/var/opt` adds no
 wait to CarPlay: `/var/opt` is mounted from fstab before `local-fs.target`,
 which CarPlay is already ordered after.
+
+After a restore the original is on disk with our backup: install-time
+activation leaves the patch off while the patch record names the restore,
+whatever else is left of the patch (an aapd.conf the restore did not get
+to), `patchd` reports `recovered` with the count, and the app's Status row
+reads `Removed after errors`; the Patch button applies the patch again.
 
 **The watcher** (`recovery.js`, `waze-on-cluster-recovery.service`, after
 the boot step) follows CarPlay by run (systemd's `InvocationID`). While a
@@ -756,46 +881,43 @@ down it asks every 5 s. A run that ended `failed` (a `Result` other than
 `success`) is a crash, counted once per run, also when it ended before the
 watcher first looked: unless `patchd` killed that run to activate a change
 (it records the run's `InvocationID` in
-`/dev/shm/waze-on-cluster/carplay-killed`), or the system is stopping. A
+`/dev/shm/waze-on-cluster/carplay-killed`), or the system is stopping: a
+systemd shutdown (`shutdown.target` queued or active) or an NSM shutdown
+(`var-opt-ro.service` queued or running, or this boot's shutdown record
+already written, since CarPlay can die in it after the record). In the
+emulator nothing in systemd marks the first seconds of an NSM shutdown,
+before `var-opt-ro.service` starts (about 3 s, while the NodeStateManager
+sends its clients the shutdown event); a CarPlay death there would still
+count, which has not been seen. A
 run a SIGKILL ended under the drop-in ends `success` (`ExecMainCode=2`,
 `ExecMainStatus=9`) and is no crash either; unless `patchd` killed it (it
 starts CarPlay itself) or the system is stopping, the watcher starts CarPlay
 again, as after a crash below. A run that exited by SIGTERM or with code 0
-is left as it is.
+is left as it is. A run active for 60 s marks the start healthy. A SIGTERM
+while the system stops marks a start without a crash orderly.
 The crash is written to `arm` at once, before anything else, since the next
-moment can be the reboot. When that write fails, the watcher restores a
-restorable patch at once, whatever the count; this boot's crashes and
-starts are also kept in memory, so an unwritable state file does not lift
-the start limit.
+moment can be the reboot. When that write fails, the watcher restores the
+patch at once, whatever the count; this boot's crashes and starts are also
+kept in memory, so an unwritable state file does not lift the start limit.
 
 Otherwise the watcher only records the crash, and the boot step restores at
 the next start. Where recmgr loaded its `carplay` entry this boot and the
-head unit stays up, for a patched binary at `fails` plus this start's crashes ≥
-2 the watcher restores the original, then starts CarPlay with `systemctl
-start carplay.service`, 5 s, 15 s and 60 s after a crash, at most three
-times per head-unit start, only while CarPlay is down, the system is not
-stopping and `patchd` does not hold the remount lock. The run it starts is
-probed at the next tick. A run active for 60 s marks the start healthy. The
-watcher also runs the boot step's logic at its own start, so a start whose
-boot step did not run or finish is counted, and a restore it left undone is
-retried. A stop waits for a restore in progress.
-
-**Restoring** is the `carplay_patch.js revert` CarPlay's Remove patch button uses (a
-verified backup of the target's own build, above), with `/` read-write only
-for the write and read-only again after. CarPlay counts as patched, for the
-counter and the restore, when `status` reads `restorable: yes`: whatever the
-locator makes of the binary, so a patch any version of this tool wrote is
-counted and restored. A stock or firmware-replaced binary is left alone and
-the counter cleared. The
-watcher keeps the patched binary linked as `<target>.woc-running`, since
-CarPlay could start between its check and the rename; the boot step, which
-CarPlay waits for, links it only if a process runs it. `patchd` removes a
-link nothing runs. A
-shared remount lock (`remount_lock.js`) keeps it and `patchd` from remounting
-`/` at once; the watcher yields to `patchd`, a boot step waits up to 20 s for
-it. Recovery never stops, kills,
-restarts or reboots anything; its only action on a service is the start
-above.
+head unit stays up, for a patch at `fails` plus this start's crashes at the
+threshold the watcher restores the original, then starts CarPlay with
+`systemctl start carplay.service`, 5 s, 15 s and 60 s after a crash, at
+most three times per head-unit start, only while CarPlay is down, the
+system is not stopping and `patchd` does not hold the remount lock. The run
+it starts is probed at the next tick. The watcher also runs the boot step's
+logic at its own start, so a start whose boot step did not run or finish is
+counted, and a restore it left undone is retried. The watcher keeps the
+patched binary linked as `<target>.woc-running`, since CarPlay could start
+between its check and the rename; the boot step, which CarPlay waits for,
+links it only if a process runs it. `patchd` removes a link nothing runs. A
+shared remount lock (`remount_lock.js`) keeps it and `patchd` from
+remounting `/` at once; the watcher yields to `patchd`, a boot step waits up
+to 10 s for it. A stop waits for a restore in progress. Recovery never
+stops, kills, restarts or reboots anything; its only action on a service is
+the start above.
 
 **By hand.** Keep the phone from connecting (unplug it, or turn off its
 Wi-Fi and Bluetooth) so CarPlay has no session to crash in, then over SSH run
@@ -849,8 +971,9 @@ repository carries no BMW binary.
   on a copy, against a fake `/proc`, `mount`, `systemctl` and recmgr list:
   both activation branches (a restart only with the recmgr entry and the
   drop-in loaded), every row of the install table, the marker, the
-  link's lifetime, `/` read-only after every path, and no `systemctl`, `kill`
-  or `reboot` from the hooks.
+  link's lifetime, `/` read-only after every path, no `systemctl`, `kill`
+  or `reboot` from the hooks, and boot recovery's restore reported as
+  `recovered` and left off by an install.
 - `aapd_test.js` (`AAPD_BIN`, `AAPD_CONF`, and `CARPLAY_BIN` when set): the
   coding refused unless 7 or unreadable; every anchor and site of the four
   edits perturbed, another size and an unproven file refused with nothing
@@ -875,16 +998,41 @@ repository carries no BMW binary.
   second, three starts a boot, `patchd`'s kill, no start without recmgr's
   entry, crashes across boots versus a switch-off, the real boot step
   restoring copies with `/` read-only after, SIGTERM during a restore, the
-  unit's timeouts and order, component.json's lists, and the shutdown
-  record of a SIGKILLed aapd and of an oom-killed one.
-- `recovery_test.js`: the counter across crash loops with orderly and fast
-  shutdowns, the boot step's restore before CarPlay starts and its fast
-  path, crashes per CarPlay run (before the first look, of a run the
-  watcher started, after `patchd`'s kill), a SIGKILL that was not
-  `patchd`'s (started again, no crash) and the exits left alone, the
-  in-boot crash, restore and start with and without recmgr's entry, a state
-  that cannot be saved (the previous one kept, a restorable patch restored
-  at once, the start limit kept) and a folder that cannot be synced, a 0.7.5
-  arm, what is not a crash, a stop during a restore,
-  `shutdown_mark.sh` with a hung `systemctl`, the units' timeouts against
-  the restore's bound, the remount lock and a real restore on a copy.
+  unit's timeouts and order, component.json's lists, the shutdown
+  record of a SIGKILLed aapd and of an oom-killed one, the restart
+  `reboot` records for boot recovery, and an install after a restore that
+  left aapd.conf patched.
+- `recovery_test.js`, on folders of real files (targets, backups, patch
+  records, state files, the marks `shutdown_mark.sh` writes) with systemd
+  and mount faked: each threshold for carplay and aapd (unproven at the
+  second boot, proven and a binary the record does not describe at the
+  third), a failure another process causes, a crash the watcher saw before
+  an orderly stop, a switch-off within the healthy window, a restart the
+  user asked for (`patchd`'s record, the watcher's orderly stop), a power
+  cut, a healthy boot, the original or no backup of ours, a missing or
+  corrupt state file or patch record, both services patched (a failure
+  nothing explains counts for both, a crash for its service, an unpatched
+  service's crash explains nothing), a backup that does not match its
+  record (refused, the service starts, retried), another build, aapd.conf
+  another file, the restore's mode, temporary file, marker, remount lock
+  and `.woc-running` link, a remount that leaves `/` writable, a record
+  that cannot be saved; the watcher's crashes per run, starts, kills, a
+  crash seen once `/var/opt` went read-only, a stop during a restore; the
+  system's stopping state; `shutdown_mark.sh` and its crash record; the
+  boot step with an unreadable binary and its timing, its exit status, the
+  units; the patchers' records; a state of 0.8.1 or earlier starting its
+  counts again; a shutdown inside the healthy window with no restart
+  record counted as a boot with no record; a restart record from after
+  the armed boot or ahead of the clock ignored; a boot the service never
+  ran in; two failed boots with and without a healthy one between; a crash
+  seen once this boot's shutdown record is written, and an NSM shutdown
+  under way; a boot step out of time putting `/` back read-only and
+  releasing the lock; a backup whose record names another build-id
+  refused; a backup without its record restored only when it is the
+  proven build's shipped file; a service systemd started that died before
+  the watcher looked counted as having run; on a refused head unit, a
+  patch restored whatever the count, aapd.conf left patched restored too,
+  and nothing remounted with nothing to restore; and, with `CARPLAY_BIN`,
+  `AAPD_BIN` and `AAPD_CONF`, the real
+  boot step restoring patched copies and its time. `TEST_ONLY=<part of a
+  name>` runs only the tests it names.

@@ -63,6 +63,8 @@
  *                    restart: {state: idle | restarting | failed, code (when
  *                    failed: refused, stayed or error), reason, possibleAt
  *                    (while the restart limit holds: when one is taken again)}
+ *                    recovered: n, while the original boot recovery restored
+ *                    after n failed head-unit starts is on disk (also in aa)
  *                    conflict: why the patch is not applied when the tool is
  *                    installed (a head unit that refuses our parts: "not
  *                    supported on this car (head unit: ...)"; a binary the
@@ -105,6 +107,7 @@ var cp = require('child_process');
 var lock = require('./remount_lock.js');
 var bootIds = require('./boot_id.js');
 var headUnit = require('./head_unit.js');
+var record = require('./patch_record.js');
 
 var HERE = __dirname;
 var PATCHER = path.join(HERE, 'carplay_patch.js');
@@ -133,6 +136,9 @@ var AA_CARD_FILE = path.join(STATE_DIR, 'aa-card');
  * shipped waze-on-cluster.conf holds the crop for the card shown. */
 var AA_CROP_ENV = path.join(STATE_DIR, 'aa-crop.env');
 var REBOOTS_FILE = path.join(STATE_DIR, 'reboots.json');
+/* The boot a restart was asked for in: boot recovery takes the end of that
+ * boot for an orderly one. */
+var RESTART_FILE = path.join(STATE_DIR, 'restart-requested');
 /* A density or turn-card change rewrites aapd.conf on / and can restart
  * aapd: at most one per DENSITY_SPACING_MS. A head-unit restart at most one per
  * REBOOT_SPACING_MS, across patchd restarts too. */
@@ -411,9 +417,16 @@ function readState(cb) {
         if (pending) { state = 'unknown'; mode = null; reason = pending.reason; carplay = 'deferred'; }
         cachedState = { state: state, panel: variant ? variant[1].toLowerCase() : null, mode: mode, res: res, safe: safe, reason: reason, carplay: carplay,
                         pending: pending ? pending.action || 'apply' : null, pendingBy: pending ? pending.by : null,
-                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable };
+                        conflict: conflict, binary: binary, known: known, backup: hasBackup, restorable: restorable, recovered: recovered(TARGET) };
         cb(cachedState);
     });
+}
+
+/* The failed head-unit starts after which boot recovery restored the
+ * original that is on disk now, or null (patch_record.js). */
+function recovered(target) {
+    var rec = record.current(target);
+    return rec && rec.by === 'recovery' ? rec.fails || 1 : null;
 }
 
 /* The Android Auto patch as aapd_patch.js status reads it: { state:
@@ -473,6 +486,7 @@ function readAaState(cb, fresh) {
             : !backup && !pristine ? 'aapd was modified by something else'
             : /^UNKNOWN/.test(geom) && !backup ? 'aapd.conf is not the known original'
             : foreignStart(AA);
+        st.recovered = recovered(AAPD);
         var pending = readPending(AA);
         if (pending) {
             st.state = 'unknown'; st.reason = pending.reason; st.aapd = 'deferred'; st.pending = pending.action || 'apply'; st.pendingBy = pending.by;
@@ -503,7 +517,7 @@ function cropEnv(card, dpi) { return card === 'hidden' ? 'WOC_SRC_CROP=-s src_cr
 function aaMsg(st) {
     var m = { state: busy === 'aa' ? 'busy' : st.state, density: st.density, card: st.card, densities: [aapdConf.DENSITY_MIN, aapdConf.DENSITY_MAX, aapdConf.DENSITY_STEP] };
     /* While a change runs, the line says so; the values on disk stay. */
-    if (busy !== 'aa') ['reason', 'conflict', 'aapd'].forEach(function (k) { if (st[k]) m[k] = st[k]; });
+    if (busy !== 'aa') ['reason', 'conflict', 'aapd', 'recovered'].forEach(function (k) { if (st[k]) m[k] = st[k]; });
     ['pending', 'dpi', 'diskCard'].forEach(function (k) { if (st[k]) m[k] = st[k]; });
     if (st.pending && st.run !== undefined) { m.runDpi = st.run ? st.run.dpi : null; m.runCard = st.run ? st.run.card : null; }
     if (lastDensityAt + DENSITY_SPACING_MS > Date.now()) m.changeAt = lastDensityAt + DENSITY_SPACING_MS;
@@ -531,6 +545,7 @@ function status(extra, aaExtra) {
             if (!cpBusy && st.carplay) msg.carplay = st.carplay;
             if (!cpBusy && st.pending) msg.pending = st.pending;
             if (!cpBusy && st.conflict) msg.conflict = st.conflict;
+            if (!cpBusy && st.recovered) msg.recovered = st.recovered;
             if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
             msg.aa = aaMsg(aa);
             if (aaExtra) Object.keys(aaExtra).forEach(function (k) { msg.aa[k] = aaExtra[k]; });
@@ -1081,7 +1096,8 @@ function aaRevert(noRestart, dropBackup, done) {
 /* A file in STATE_DIR, written whole by rename. */
 function saveFile(f, text) {
     try { fs.mkdirSync(STATE_DIR, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-    fs.writeFileSync(f + '.tmp', text, { mode: 0o644 });
+    var fd = fs.openSync(f + '.tmp', 'w', 0o644);
+    try { fs.writeSync(fd, text); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(f + '.tmp', f);
 }
 
@@ -1118,6 +1134,7 @@ function rebootCmd(sock) {
     }
     if (!deny) try { recordReboots(recent.concat(now)); } catch (e) { deny = 'cannot record the restart: ' + e.message; }
     if (deny) { reply(sock, { ev: 'reboot-reply', ok: false, reason: deny }); return; }
+    try { saveFile(RESTART_FILE, (bootId() || '') + '\n'); } catch (e) { log('recording the restart for boot recovery failed: ' + e.message); }
     rebooting = true;
     restartFail = null;
     log('restart requested: head-unit restart to activate the pending change (' + REBOOT_CMD.join(' ') + ')');
@@ -1131,6 +1148,7 @@ function rebootCmd(sock) {
         rebooting = false;
         restartFail = { code: code, reason: why };
         if (code !== 'stayed') try { recordReboots(recentReboots(Date.now()).filter(function (t) { return t !== now; })); } catch (e) {}
+        try { fs.unlinkSync(RESTART_FILE); } catch (e) {}
         log('reboot failed: ' + why);
         send({ ev: 'reboot-reply', ok: false, reason: why });
         status();
@@ -1307,8 +1325,8 @@ function ensureDir(dir) {
  * a known file without a conflict: a proven original (no backup of ours) or
  * a patch of ours, any configuration of it, which the patcher brings up to
  * date or leaves as it is; an original with our backup was reverted by the
- * user and stays so, as does a pending change other than a removal's
- * revert. After a removal's revert an install patches a proven build again;
+ * user and stays so, a patch boot recovery removed stays so whatever is
+ * left of it, as does a pending change other than a removal's revert. After a removal's revert an install patches a proven build again;
  * a build outside the proven list, its backup dropped, stays reverted (a
  * conflict). deactivate reverts a patch of ours, a pending one too, also one
  * the patcher no longer recognises when our verified backup of the same
@@ -1319,6 +1337,9 @@ function plan(which, st, name) {
         return { why: 'a change already waits for the next head-unit start' };
     }
     if (which === 'deactivate' && st.restorable) return { op: 'revert' };
+    if (which === 'activate' && st.recovered) {
+        return { why: 'boot recovery removed the patch after ' + st.recovered + ' failed head-unit start' + (st.recovered === 1 ? '' : 's') + '; its Patch button applies it' };
+    }
     if (st.conflict && (which === 'activate' || !st.known || st.otherBuild)) return { conflict: st.conflict };
     if (which === 'deactivate') return st.binary === 'original' && !st.backup ? { why: name + ' is the original' } : { op: 'revert' };
     if (st.binary === 'original' && st.backup) return { why: 'the patch was turned off; its Patch button applies it' };

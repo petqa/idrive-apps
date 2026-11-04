@@ -44,6 +44,7 @@ var cp = require('child_process');
 var conf = require('./aapd_conf.js');
 var buildId = require('./carplay_locate.js').buildId;
 var headUnit = require('./head_unit.js');
+var record = require('./patch_record.js');
 
 /* aapd 22.39.3 as shipped on MGU P18_23w44.2-1-3. */
 var KNOWN = {
@@ -214,6 +215,10 @@ function geometryText(cur, t) {
     return g ? 'PATCHED (' + g.dpi + ' dpi, card ' + g.card + ', crop ' + conf.srcCrop(g.card, g.dpi) + ')' : 'UNKNOWN (not the known original or our edit of it)';
 }
 
+/* Only the one proven build can be patched (KNOWN), so a patch of ours is
+ * always of it. */
+var PATCHED = { patched: true, proven: true };
+
 function line(k, v) { process.stdout.write((k + ':                ').slice(0, 17) + v + '\n'); }
 
 function cmdStatus(t) {
@@ -267,7 +272,7 @@ function cmdApply(t, dpi, card, yes) {
     EDITS.forEach(function (e) { Buffer.from(e.patched, 'hex').copy(outBin, e.off); });
     var outConf = Buffer.from(conf.transform(origText.toString('utf8'), dpi, card), 'utf8');
     var binChange = !outBin.equals(buf), confChange = !outConf.equals(text);
-    if (!binChange && !confChange) { process.stdout.write('nothing to do; already in the requested state\n'); return; }
+    if (!binChange && !confChange) { process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(t.target, PATCHED); return; }
 
     var need = (binChange ? (bb ? 0 : buf.length) + buf.length : 0) + (confChange ? (cb ? 0 : text.length) + outConf.length : 0) + MIN_FREE_MARGIN;
     var free = freeBytes(path.dirname(t.target));
@@ -280,6 +285,7 @@ function cmdApply(t, dpi, card, yes) {
     if (confChange && !cb) saveBackup(t.conf, text, {});
     if (binChange) writeInPlace(t.target, outBin);
     if (confChange) writeInPlace(t.conf, outConf);
+    record.ensure(t.target, PATCHED);
     process.stdout.write('patched OK. aapd sha256 ' + sha256(outBin) + ', aapd.conf ' + dpi + ' dpi, card ' + card + '\n');
 }
 
@@ -306,6 +312,7 @@ function cmdRevert(t, yes, force, dropBackup) {
     if (!wrote && left.length) die(left.join('; '));
     left.forEach(function (l) { process.stdout.write(l + '\n'); });
     if (!wrote) process.stdout.write('already at the original; nothing to do\n');
+    if (/^(original|other)$/.test(undoState(t.target, true))) record.ensure(t.target, { patched: false });
     /* A file left restorable or with an untrusted backup keeps its backup,
      * and the revert fails: it is not undone. */
     var undone = plans.every(function (x) { var u = undoState(x.file, x.file === t.target); return u !== 'restorable' && u !== 'untrusted'; });
@@ -313,7 +320,7 @@ function cmdRevert(t, yes, force, dropBackup) {
         plans.forEach(function (x) {
             var u = undoState(x.file, x.file === t.target);
             if (u === 'restorable' || u === 'untrusted') return;
-            [backupPath(x.file), metaPath(x.file), backupPath(x.file) + '.tmp', metaPath(x.file) + '.tmp', x.file + '.woc-tmp'].forEach(function (f) {
+            [backupPath(x.file), metaPath(x.file), backupPath(x.file) + '.tmp', metaPath(x.file) + '.tmp', x.file + '.woc-tmp', record.recordPath(x.file)].forEach(function (f) {
                 try { fs.unlinkSync(f); } catch (e) { if (e.code !== 'ENOENT') die('dropping ' + f + ': ' + e.message); }
             });
         });
@@ -337,6 +344,6 @@ function main() {
     else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-module.exports = { EDITS: EDITS, CODING: CODING };
+module.exports = { EDITS: EDITS, CODING: CODING, KNOWN: KNOWN, trusted: trusted, binOther: binOther };
 
 if (require.main === module) main();
