@@ -93,6 +93,7 @@ test-node:
 	$(NODE) patch/test/units_test.js
 	$(NODE) patch/test/aapd_test.js
 	$(NODE) patch/test/head_unit_test.js
+	$(NODE) patch/test/aapd_aa2144_test.js
 
 test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/nal_reader_test

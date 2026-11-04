@@ -22,12 +22,16 @@
  *              reads 12.3 as class 0 does, so aapd uses aapd.conf's 12.3
  *              geometry instead of its built-in 800x480 default.
  *
- * Only the one build is proven: its first edit needs the whole file to be
- * the shipped one (KNOWN.sha256), and every edit site is checked by its
- * anchor bytes on both sides. aapd.conf is pinned the same way. Backups of
- * both are taken before the first edit, each with its record, and trusted
- * by the recorded SHA-256; revert needs no anchors. apply is refused on a
- * head unit that refuses our parts (head_unit.js); revert works on any.
+ * One build is proven and applied by the app and the install hooks; a
+ * second has a parked-car test with limitations (BUILDS[].experimental).
+ * Its first edit requires an explicit --experimental opt-in, never passed
+ * by a hook or the app. Either way the first edit needs the whole file to be that build
+ * as shipped (its sha256), and every edit site is checked by its anchor
+ * bytes on both sides. aapd.conf is pinned the same way. Backups of both
+ * are taken before the first edit, each with its record, and trusted by the
+ * recorded SHA-256; revert needs no anchors and no opt-in.
+ * apply is refused on a head unit that refuses our parts (head_unit.js);
+ * revert works on any.
  *
  *   aapd_patch.js status [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>]
  *   aapd_patch.js apply  [--dpi <n>] [--card shown|hidden] [--target ...] [--conf ...] [--coding ...] [--yes]
@@ -45,28 +49,72 @@ var conf = require('./aapd_conf.js');
 var buildId = require('./carplay_locate.js').buildId;
 var headUnit = require('./head_unit.js');
 
-/* aapd 22.39.3 as shipped on MGU P18_23w44.2-1-3. */
-var KNOWN = {
-    version: 'aapd 22.39.3+gitrAUTOINC+d5a1db18c4-r0',
-    size: 7367952,
-    sha256: '6880f54c3abba40c1368f2bf254c77bd4a169323c0d4cab8f9662a7c912dcf89',
-};
-
-/* Each edit: its offset, the stock and patched bytes, and the anchors that
- * end at it and start after it. */
-var EDITS = [
-    { name: 'gate', off: 0x998bd, original: '83bb1c02000001', patched: '83bb1c02000002',
-      before: 'ff928000000084c0740a', after: '0f96c0488b4c240864' },
-    { name: 'selfstart call', off: 0x1d43eb, original: 'e800f8ffff', patched: 'e840fbffff',
-      before: '4889442410', after: '488b442428' },
-    { name: 'selfstart guard', off: 0x1d3f5d, original: '0f848d000000', patched: 'e98e00000090',
-      before: '837b4402', after: 'e8a805ebff' },
-    { name: 'screen', off: 0x15b440, original: '660fefc0ebe1662e0f1f840000000000', patched: '83f802740b660fefc0ebdc0f1f440000',
-      before: '4883c418c30f1f4000', after: 'f20f1005189d3c00ebcd' },
+/* The patchable aapd builds. Each has its own four edits (the code moved
+ * between builds): their offsets, stock and patched bytes, and the anchors
+ * that end at the site and start after it. The stock and patched bytes
+ * happen to be the same across these two builds, but every site is pinned
+ * by its anchors on both sides, so a byte that moved is caught.
+ *
+ *   22.39.3  proven on a car (MGU P18_23w44.2-1-3); the app and the install
+ *            hooks apply it.
+ *   21.44.4  MGU O18_22w40.3-1-9; same edit semantics, confirmed offline by
+ *            disassembly and tested on a parked G30 (PATCH.md). Kept
+ *            experimental: the patcher first applies it only with an explicit
+ *            --experimental opt-in (or WOC_AA_EXPERIMENTAL=1), and never a
+ *            hook or the app. revert and boot recovery undo it with no
+ *            opt-in, so a removal always cleans up. */
+var BUILDS = [
+    { version: 'aapd 22.39.3+gitrAUTOINC+d5a1db18c4-r0', size: 7367952,
+      sha256: '6880f54c3abba40c1368f2bf254c77bd4a169323c0d4cab8f9662a7c912dcf89', experimental: false,
+      edits: [
+        { name: 'gate', off: 0x998bd, original: '83bb1c02000001', patched: '83bb1c02000002',
+          before: 'ff928000000084c0740a', after: '0f96c0488b4c240864' },
+        { name: 'selfstart call', off: 0x1d43eb, original: 'e800f8ffff', patched: 'e840fbffff',
+          before: '4889442410', after: '488b442428' },
+        { name: 'selfstart guard', off: 0x1d3f5d, original: '0f848d000000', patched: 'e98e00000090',
+          before: '837b4402', after: 'e8a805ebff' },
+        { name: 'screen', off: 0x15b440, original: '660fefc0ebe1662e0f1f840000000000', patched: '83f802740b660fefc0ebdc0f1f440000',
+          before: '4883c418c30f1f4000', after: 'f20f1005189d3c00ebcd' },
+      ] },
+    { version: 'aapd 21.44.4+gitr825+21296a5-r0.24', size: 7363856,
+      sha256: 'e2344fe548af1171105c11ecbc1db40dd68f8790787d8edc5e83d0236d432e9e', experimental: true,
+      edits: [
+        /* gate: same offset and bytes as 22.39.3. */
+        { name: 'gate', off: 0x998bd, original: '83bb1c02000001', patched: '83bb1c02000002',
+          before: 'ff928000000084c0740a', after: '0f96c0488b4c240864' },
+        /* selfstart call: onNewNavigationStatus tail; 0x70 below 22.39.3. The
+         * retarget e840fbffff reaches requestStream at 0x1d3ec0. */
+        { name: 'selfstart call', off: 0x1d437b, original: 'e800f8ffff', patched: 'e840fbffff',
+          before: '4889442410', after: '488b442428' },
+        /* selfstart guard: the je on [rbx+0x44]==2 in requestStream, 0x70
+         * below 22.39.3; jmp 0x1d3f80 keeps the destination. The after-anchor
+         * is a relative call, so its bytes differ from 22.39.3. */
+        { name: 'selfstart guard', off: 0x1d3eed, original: '0f848d000000', patched: 'e98e00000090',
+          before: '837b4402', after: 'e81806ebff' },
+        /* screen: loadKombiDisplayDefinition's class->size fall-through, 0x70
+         * below 22.39.3; je reaches the 12.3 load, jmp the return. The
+         * after-anchor is the rip-relative 12.3 load, so its bytes differ. */
+        { name: 'screen', off: 0x15b3d0, original: '660fefc0ebe1662e0f1f840000000000', patched: '83f802740b660fefc0ebdc0f1f440000',
+          before: '4883c418c30f1f4000', after: 'f20f1005c89a3c00ebcd' },
+      ] },
 ];
+
+/* The proven build; the app, the hooks and older code and tests read KNOWN
+ * and EDITS for it. */
+var KNOWN = BUILDS[0];
+var EDITS = BUILDS[0].edits;
+
+/* The build whose size is len, or null. The two sizes are distinct, so size
+ * selects the build; its anchors then confirm the file really is that build
+ * and the first-edit sha256 gate confirms it is the pristine one. */
+function buildBySize(len) {
+    for (var i = 0; i < BUILDS.length; i++) if (BUILDS[i].size === len) return BUILDS[i];
+    return null;
+}
+
 /* The most bytes aapd may differ in from its backup and still be its build:
- * the edits' bytes, twice over. */
-var SAME_BUILD_MAX_DIFF = 2 * EDITS.reduce(function (n, e) { return n + e.original.length / 2; }, 0);
+ * the edits' bytes, twice over (every build's edits are the same sizes). */
+var SAME_BUILD_MAX_DIFF = 2 * BUILDS[0].edits.reduce(function (n, e) { return n + e.original.length / 2; }, 0);
 
 /* /dev/shm/rawcodingdata, the coding image CodingShmApp publishes: a 0x2c
  * byte header (flags at 0x28, 0x09 = valid coding) and the blocks. aapd's
@@ -103,11 +151,14 @@ function siteState(buf, e) {
         : { state: 'unknown', reason: e.name + ': bytes ' + cur + ' are neither stock nor patched' };
 }
 
-/* { states, bad: [why] } for the binary. */
+/* { build, states, bad: [why] } for the binary: the build its size selects
+ * (null when no build has that size), each site's state against that build's
+ * edits, and the sites whose anchors do not match. */
 function classify(buf) {
-    if (buf.length !== KNOWN.size) return { states: null, bad: ['size ' + buf.length + ' is not the proven build\'s ' + KNOWN.size] };
-    var states = EDITS.map(function (e) { return siteState(buf, e); });
-    return { states: states, bad: states.filter(function (s) { return s.state === 'unknown'; }).map(function (s) { return s.reason; }) };
+    var build = buildBySize(buf.length);
+    if (!build) return { build: null, states: null, bad: ['size ' + buf.length + ' is not a known aapd build'] };
+    var states = build.edits.map(function (e) { return siteState(buf, e); });
+    return { build: build, states: states, bad: states.filter(function (s) { return s.state === 'unknown'; }).map(function (s) { return s.reason; }) };
 }
 
 /* The backup with its record, trusted by the recorded SHA-256: {buf, meta}
@@ -139,9 +190,12 @@ function restorePlan(file, cur, isBin) {
     if (!cur) return { out: b.buf, other: 'it is missing' };
     var other = isBin ? binOther(cur, b.buf) : conf.otherFile(cur.toString('utf8'), b.buf.toString('utf8'));
     var out = b.buf;
-    if (isBin && !other && !classify(cur).bad.length && sha256(b.buf) === KNOWN.sha256) {
-        out = Buffer.from(cur);
-        EDITS.forEach(function (e) { b.buf.copy(out, e.off, e.off, e.off + e.original.length / 2); });
+    if (isBin && !other) {
+        var bb = buildBySize(b.buf.length), cc = classify(cur);
+        if (bb && cc.build === bb && !cc.bad.length && sha256(b.buf) === bb.sha256) {
+            out = Buffer.from(cur);
+            bb.edits.forEach(function (e) { b.buf.copy(out, e.off, e.off, e.off + e.original.length / 2); });
+        }
     }
     return { out: out, other: other };
 }
@@ -228,8 +282,14 @@ function cmdStatus(t) {
     var why = notRestorable(t);
     line('restorable', why ? 'no (' + why + ')' : 'yes');
     line('undo', undoLine(t));
-    line('known', c.bad.length ? 'NO — ' + c.bad[0] : sha256(buf) === KNOWN.sha256 ? 'yes, pristine ' + KNOWN.version : 'yes, modified build');
-    if (c.states) EDITS.forEach(function (e, i) {
+    var knownLine;
+    if (c.bad.length) knownLine = 'NO — ' + c.bad[0];
+    else {
+        var tag = c.build.experimental ? 'experimental' : 'yes';
+        knownLine = sha256(buf) === c.build.sha256 ? tag + ', pristine ' + c.build.version : tag + ', modified build';
+    }
+    line('known', knownLine);
+    if (c.states) c.build.edits.forEach(function (e, i) {
         var s = c.states[i];
         line(e.name.replace(' ', '-'), s.state === 'unknown' ? 'UNKNOWN (' + s.reason + ')' : s.state.toUpperCase());
     });
@@ -238,7 +298,7 @@ function cmdStatus(t) {
         (fs.existsSync(backupPath(t.conf)) ? ', ' + backupPath(t.conf) : ''));
 }
 
-function cmdApply(t, dpi, card, yes) {
+function cmdApply(t, dpi, card, yes, experimental) {
     var hu = headUnit.refused();
     if (hu) die('refusing: ' + hu);
     if (conf.DENSITIES.indexOf(dpi) < 0) die('--dpi must be ' + conf.DENSITY_MIN + '-' + conf.DENSITY_MAX + ' in steps of ' + conf.DENSITY_STEP);
@@ -252,9 +312,16 @@ function cmdApply(t, dpi, card, yes) {
     var c = classify(buf);
     if (c.bad.length) die('refusing: ' + c.bad.join('; '));
     var bb = trusted(t.target);
+    /* The experimental build is applied only on an explicit opt-in, and only
+     * for the first edit (the one that writes the backup); once our backup of
+     * it exists the opt-in is recorded, so a later density or card change
+     * needs no flag. A hook or the app never passes it, so neither ever makes
+     * that first edit. revert needs no opt-in. */
+    if (c.build.experimental && !bb && !experimental)
+        die('refusing: ' + c.build.version + ' is experimental — limited parked-car testing; see PATCH.md. Re-run apply with --experimental (or WOC_AA_EXPERIMENTAL=1) to opt in on a parked car.');
     if (bb && bb.err) die('refusing: ' + bb.err);
-    if (bb && (sha256(bb.buf) !== KNOWN.sha256 || binOther(buf, bb.buf))) die('refusing: backup ' + backupPath(t.target) + ' is not the original of this build');
-    if (!bb && sha256(buf) !== KNOWN.sha256) die('first edit requires the pristine build (sha256 ' + KNOWN.sha256 + '), got ' + sha256(buf));
+    if (bb && (sha256(bb.buf) !== c.build.sha256 || binOther(buf, bb.buf))) die('refusing: backup ' + backupPath(t.target) + ' is not the original of this build');
+    if (!bb && sha256(buf) !== c.build.sha256) die('first edit requires the pristine build (sha256 ' + c.build.sha256 + '), got ' + sha256(buf));
 
     var text = readOr(t.conf);
     if (!text) die('cannot read ' + t.conf);
@@ -264,7 +331,7 @@ function cmdApply(t, dpi, card, yes) {
     if (cb && !text.equals(cb.buf) && !conf.edited(cb.buf.toString('utf8'), text.toString('utf8'))) die('refusing: ' + t.conf + ' was modified by something else');
 
     var outBin = Buffer.from(buf);
-    EDITS.forEach(function (e) { Buffer.from(e.patched, 'hex').copy(outBin, e.off); });
+    c.build.edits.forEach(function (e) { Buffer.from(e.patched, 'hex').copy(outBin, e.off); });
     var outConf = Buffer.from(conf.transform(origText.toString('utf8'), dpi, card), 'utf8');
     var binChange = !outBin.equals(buf), confChange = !outConf.equals(text);
     if (!binChange && !confChange) { process.stdout.write('nothing to do; already in the requested state\n'); return; }
@@ -276,7 +343,7 @@ function cmdApply(t, dpi, card, yes) {
 
     process.stdout.write('About to patch ' + t.target + ' and ' + t.conf + ' (' + dpi + ' dpi, card ' + card + ')\n');
     if (!yes) die('pass --yes to proceed');
-    if (binChange && !bb) saveBackup(t.target, buf, { version: KNOWN.version, buildId: buildId(buf) });
+    if (binChange && !bb) saveBackup(t.target, buf, { version: c.build.version, buildId: buildId(buf) });
     if (confChange && !cb) saveBackup(t.conf, text, {});
     if (binChange) writeInPlace(t.target, outBin);
     if (confChange) writeInPlace(t.conf, outConf);
@@ -326,17 +393,17 @@ function main() {
     var argv = process.argv.slice(2), a = { _: [] };
     for (var i = 0; i < argv.length; i++) {
         var k = argv[i];
-        if (k === '--yes' || k === '--force' || k === '--drop-backup') a[k.slice(2)] = true;
+        if (k === '--yes' || k === '--force' || k === '--drop-backup' || k === '--experimental') a[k.slice(2)] = true;
         else if (k === '--target' || k === '--conf' || k === '--coding' || k === '--dpi' || k === '--card') a[k.slice(2)] = argv[++i];
         else a._.push(k);
     }
     var t = { target: a.target || '/usr/bin/aapd', conf: a.conf || '/etc/aapd.conf', coding: a.coding || '/dev/shm/rawcodingdata' };
     if (a._[0] === 'status') cmdStatus(t);
-    else if (a._[0] === 'apply') cmdApply(t, a.dpi === undefined ? conf.DEFAULT_DPI : Number(a.dpi), a.card || conf.DEFAULT_CARD, a.yes);
+    else if (a._[0] === 'apply') cmdApply(t, a.dpi === undefined ? conf.DEFAULT_DPI : Number(a.dpi), a.card || conf.DEFAULT_CARD, a.yes, a.experimental || process.env.WOC_AA_EXPERIMENTAL === '1');
     else if (a._[0] === 'revert') cmdRevert(t, a.yes, a.force, a['drop-backup']);
-    else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--force] [--drop-backup]\n'); process.exit(2); }
+    else { process.stderr.write('usage: aapd_patch.js status|apply|revert [--target <aapd>] [--conf <aapd.conf>] [--coding <shm>] [--dpi <n>] [--card shown|hidden] [--yes] [--experimental] [--force] [--drop-backup]\n'); process.exit(2); }
 }
 
-module.exports = { EDITS: EDITS, CODING: CODING };
+module.exports = { EDITS: EDITS, CODING: CODING, BUILDS: BUILDS, KNOWN: KNOWN, classify: classify, buildBySize: buildBySize };
 
 if (require.main === module) main();

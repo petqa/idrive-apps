@@ -452,6 +452,11 @@ function readAaState(cb, fresh) {
         var edits = ['gate', 'selfstart-call', 'selfstart-guard', 'screen'].map(get), geom = get('geometry');
         var dpi = /^PATCHED \((\d+) dpi, card (\w+)/.exec(geom), coding = /^KI_KOMBI_VARIANT (\d+)$/.exec(get('coding'));
         var backup = get('backup') !== 'none', known = !/^NO/.test(get('known')), pristine = /^yes, pristine/.test(get('known'));
+        /* An experimental build (limited parked-car testing): the
+         * patcher applies it only on an explicit --experimental opt-in, which
+         * no hook or app command passes, so this is always a conflict until
+         * the owner has opted in by hand (a backup of ours then exists). */
+        var experimental = /^experimental/.test(get('known'));
         st.dpi = dpi ? Number(dpi[1]) : null;
         st.diskCard = dpi ? dpi[2] : null;
         st.known = known;
@@ -464,11 +469,13 @@ function readAaState(cb, fresh) {
         else if (edits.every(function (e) { return e === 'ORIGINAL'; }) && geom === 'ORIGINAL') st.state = 'original';
         else if (known) st.reason = 'partly patched; Android Auto\'s Patch button applies the rest';
         st.binary = st.state;
+        st.experimental = experimental;
         var hu = headUnit.refused();
         st.conflict = hu ? notSupported(hu)
             : !coding ? 'cluster coding unreadable'
             : Number(coding[1]) !== AA_CODING ? 'not supported on this car (KI_KOMBI_VARIANT ' + coding[1] + ')'
             : st.otherBuild ? 'aapd is another build than our backup'
+            : experimental && !backup ? 'experimental aapd build (limited parked-car testing); apply by hand with aapd_patch.js apply --experimental'
             : !known && !backup ? 'untested aapd build'
             : !backup && !pristine ? 'aapd was modified by something else'
             : /^UNKNOWN/.test(geom) && !backup ? 'aapd.conf is not the known original'
