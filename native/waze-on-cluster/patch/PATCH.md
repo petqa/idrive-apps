@@ -566,8 +566,8 @@ density and card changes need no flag. All head-unit, coding, hash, anchor,
 backup and configuration checks still apply.
 
 The 2026-11-04 car test used WOC 0.8.1 with this profile and cluster-render
-0.3.8. The owner confirmed Yandex's map and active route on the instrument
-cluster through Android Auto in **Map view**, correctly positioned with the
+0.3.8. The owner confirmed Google Maps and Yandex Maps with active routes
+on the instrument cluster through Android Auto in **Map view**, correctly positioned with the
 duplicate BMW guidance box hidden. The 1280x720 stream was cropped to
 1280x564 and drawn at 1088x480. The running aapd matched the patched file
 after a normal head-unit restart; there were no automatic aapd restarts.
@@ -580,10 +580,19 @@ reconnecting CarPlay and resuming navigation, the owner confirmed the map,
 centered arrow, sound and camera/parking display. CarPlay had a separate
 Yandex safe-area fix already installed; it is not part of this change.
 
+The owner's completed visual checks, all with a map and active route in
+Map view and no displacement:
+
+| Projection | Navigation app | Owner result |
+| --- | --- | --- |
+| Android Auto | Google Maps | Passed |
+| Android Auto | Yandex Maps | Passed |
+| CarPlay | Yandex Maps | Passed after reconnecting CarPlay |
+| CarPlay | Apple Maps | Passed in a subsequent separate check |
+| CarPlay | Google Maps | Passed in a subsequent separate check |
+
 **Known limits:** Assisted Driving View displaced map/application windows
-left on this car; Map view worked. The cause is not fixed here. Google Maps
-was briefly visible during initial AA testing but its final positioning was
-not separately verified. Apple Maps was not verified. Full vehicle
+left on this car; Map view worked. The cause is not fixed here. Full vehicle
 sleep/wake and repeated switching between phones are still untested.
 
 `patch/test/aapd_aa2144_test.js` checks build selection without firmware.

@@ -60,8 +60,9 @@ Android Auto version`. Whatever happens to Android Auto, the install of the
 CarPlay patch goes ahead.
 
 An additional aapd 21.44.4 profile requires an explicit manual opt-in before
-the first patch. It has a parked G30 test with Yandex and a CarPlay
-regression check, but retains known display-mode and sleep/wake limits.
+the first patch. It has parked G30 tests with Google Maps and Yandex Maps,
+plus CarPlay regression checks with Yandex, Apple Maps and Google Maps,
+but retains known display-mode and sleep/wake limits.
 See [the 21.44.4 profile and test results](patch/PATCH.md#a-second-experimental-build-21444)
 before opting in. The app and install hook do not enable it automatically.
 
