@@ -839,18 +839,86 @@ test('a crash the watcher sees once var-opt-ro made /var/opt read-only restores 
     }
 });
 
-test('a dying PID systemd has not reaped yet is no crash; systemctl is asked every 5 s', async () => {
+test('a dying PID systemd has not reaped yet is no crash', async () => {
     const w = makeWorld();
     w.install('carplay', 'proven');
-    let probes = 0;
     await startBoot(w.recovery('carplay', 'A'));
     w.svc.carplay.starts();
-    const watcher = w.recovery('carplay', 'A', { probe: (cb) => { probes++; cb(Object.assign({}, w.svc.carplay)); } });
-    for (let i = 0; i < 10; i++) { await tick(watcher); w.now.advance(1000); }
-    assert.strictEqual(probes, 2);
+    const watcher = w.recovery('carplay', 'A');
+    await tick(watcher);
     w.svc.carplay.alive.clear();   /* gone from /proc, systemd still says active */
     assert.strictEqual((await tick(watcher)).action, 'watch');
     assert.strictEqual(w.state('carplay').arm.crashes, 0);
+});
+
+test('systemctl is asked every 60 s while the service\'s main PID is in /proc, every 5 s while it is down', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'proven');
+    let probes = 0;
+    const watcher = w.recovery('carplay', 'A', { probe: (cb) => { probes++; cb(Object.assign({}, w.svc.carplay)); } });
+    await startBoot(watcher);
+    w.svc.carplay.starts();
+    for (let i = 0; i < 120; i++) { await tick(watcher); w.now.advance(1000); }
+    assert.strictEqual(probes, 2, 'carplay up');
+    w.svc.carplay.crashes();
+    probes = 0;
+    assert.strictEqual((await tick(watcher)).action, 'crash', 'its PID gone: a crash seen at the next tick');
+    assert.strictEqual(probes, 1);
+    w.svc.carplay.ends('', '');
+    probes = 0;
+    for (let i = 0; i < 10; i++) { w.now.advance(1000); await tick(watcher); }
+    assert.strictEqual(probes, 2, 'carplay down');
+    w.svc.carplay.starts();
+    probes = 0;
+    for (let i = 0; i < 5; i++) { w.now.advance(1000); await tick(watcher); }
+    assert.strictEqual(probes, 1, 'a new run found within 5 s');
+});
+
+test('the state is read for a run\'s healthy minute until it is settled, then not again in that run', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'proven');
+    let loads = 0, failSave = true;
+    const watcher = w.recovery('carplay', 'A');
+    const load = watcher._load, save = watcher._save;
+    watcher._load = function () { loads++; return load.call(this); };
+    watcher._save = function (st) { return failSave && st.arm && st.arm.confirmed ? false : save.call(this, st); };
+    await startBoot(watcher);
+    w.svc.carplay.starts();
+    await tick(watcher);
+    w.now.advance(61000);
+    assert.strictEqual((await tick(watcher)).action, 'confirmed', 'the confirmation could not be saved');
+    w.now.advance(1000);
+    assert.strictEqual((await tick(watcher)).action, 'confirmed', 'so the next tick confirms again');
+    failSave = false;
+    w.now.advance(1000);
+    assert.strictEqual((await tick(watcher)).action, 'confirmed');
+    assert.strictEqual(w.state('carplay').arm.confirmed, true);
+    loads = 0;
+    for (let i = 0; i < 30; i++) { w.now.advance(1000); await tick(watcher); }
+    assert.strictEqual(loads, 0, 'saved: no more reads this run');
+    w.svc.carplay.crashes();
+    await tick(watcher);
+    w.svc.carplay.starts();
+    w.now.advance(5000);
+    await tick(watcher);
+    w.now.advance(61000);
+    loads = 0;
+    await tick(watcher);
+    assert(loads > 0, 'the next run reads it again at its healthy minute');
+
+    const none = makeWorld();
+    none.install('carplay', 'none');
+    const idle = none.recovery('carplay', 'A');
+    let idleLoads = 0;
+    const idleLoad = idle._load;
+    idle._load = function () { idleLoads++; return idleLoad.call(this); };
+    await startBoot(idle);
+    none.svc.carplay.starts();
+    await tick(idle);
+    none.now.advance(61000);
+    idleLoads = 0;
+    for (let i = 0; i < 30; i++) { await tick(idle); none.now.advance(1000); }
+    assert.strictEqual(idleLoads, 1, 'nothing armed: read once');
 });
 
 test('a stop during a restore waits for it', async () => {

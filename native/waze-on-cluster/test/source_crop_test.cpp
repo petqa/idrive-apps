@@ -10,6 +10,7 @@ using woc::crop_picture;
 using woc::parse_source_crop;
 using woc::rect_needs_reset;
 using woc::RectRestarts;
+using woc::sequence_needs_check;
 
 static int failures = 0;
 
@@ -78,6 +79,14 @@ int main()
     expect(!rect_needs_reset(aac, 1088, 480, 1088, 480), "set up for carplay: its next picture needs nothing");
     expect(rect_needs_reset(aac, 1088, 480, 1280, 720), "an android auto picture after it needs a reset");
     expect(rect_needs_reset(SourceCrop(), 1280, 564, 1280, 720), "no crop: a whole picture differs from a cropped setup");
+
+    /* Which sequences need the per-picture decision. */
+    expect(!sequence_needs_check(SourceCrop(), 1280, 720, 1280, 720), "no crop: none");
+    expect(!sequence_needs_check(aac, 1088, 480, 1088, 480), "carplay's sequence in carplay's rect: none");
+    expect(sequence_needs_check(aac, 1280, 564, 1280, 720), "android auto's: cropped");
+    expect(sequence_needs_check(aac, 1280, 564, 1088, 480), "carplay's in android auto's rect: needs another");
+    expect(sequence_needs_check(aac, 1920, 1080, 1280, 720), "android auto's in a larger whole rect");
+    expect(sequence_needs_check(aac, 1088, 480, 0, 0), "a sequence of unknown size");
 
     /* A rect restart never repeats until a picture fits VPP's rect. */
     RectRestarts rr;

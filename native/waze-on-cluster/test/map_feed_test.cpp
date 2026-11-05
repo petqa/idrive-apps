@@ -42,7 +42,12 @@
  *   its slot following the map; the switch off releases it and the box
  *   shows, the map still showing; on again, held; off from the start,
  *   never held; the hold disabled by cluster-render's guard: never held,
- *   and the status says so. */
+ *   and the status says so;
+ * - only what the renderer needs goes: a picture repeated (as the producer
+ *   hands over a picture the same as the last) keeps a static map showing
+ *   past stall_ms; nothing reaches the renderer while the layer is hidden,
+ *   and shown again it draws the newest picture first; after the renderer
+ *   restarts, and on another target, repeats alone bring the picture. */
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -91,6 +96,10 @@ struct Rig {
      * is set, as the stream's connection says */
     int64_t live_stall_ms = 0;
     bool live = true;
+    /* frames the same as the last offered go as repeats, as the producer
+     * hands them over */
+    bool repeats = false;
+    std::vector<uint8_t> offered;
     int64_t last_frame_ms = -1;
     FreezeWatch watch{FreezeConfig()};
     ChangeSampler sampler{1088, 480};
@@ -136,8 +145,13 @@ struct Rig {
         for (int64_t t = 0; t < ms; t += 5) {
             now += 5;
             if (frame && t % frame_every == 0) {
-                spare.assign(frame->begin(), frame->end());
-                feed->offer(&spare, (uint64_t)now, now);
+                if (repeats && offered == *frame) {
+                    feed->repeat((uint64_t)now, now);
+                } else {
+                    spare.assign(frame->begin(), frame->end());
+                    feed->offer(&spare, (uint64_t)now, now);
+                    offered = *frame;
+                }
                 if (watched) {
                     const bool changed = sampler.changed(frame->data());
                     watch.frame(now, changed, sampler.blank());
@@ -178,6 +192,27 @@ struct Rig {
         for (const crs::Layer *l : svc->compositor().layers())
             return l;
         return nullptr;
+    }
+    /* The map layer's frames the renderer has counted: written, unchanged,
+     * within the threshold, superseded. */
+    unsigned long long received()
+    {
+        unsigned long long n[4] = {};
+        if (const crs::Layer *l = map_layer())
+            std::sscanf(l->stats().c_str(), "%llu sent, %llu unchanged, %llu within threshold, %llu superseded", &n[0],
+                        &n[1], &n[2], &n[3]);
+        return n[0] + n[1] + n[2] + n[3];
+    }
+    /* Whether the target's scene draws the map, and with this atlas. */
+    bool drawing(const char *target, const std::vector<uint8_t> &f, bool *with)
+    {
+        crs::FakeGraph *g = gpu.graph(target);
+        *with = false;
+        if (!g || g->drawn().empty())
+            return false;
+        for (const auto &kv : g->shown.buffers)
+            *with = *with || (kv.second.f == crs::TexFormat::R8 && kv.second.px == f);
+        return true;
     }
 };
 
@@ -233,6 +268,56 @@ static void guide_hold()
     unlink(path.c_str());
 }
 
+/* Only what the renderer needs goes over its socket. */
+static void only_what_is_needed()
+{
+    const std::vector<uint8_t> f1 = atlas(1), f2 = atlas(2);
+    Rig r(false, 6000);
+    r.repeats = true;
+    r.pump(1500, &f1);
+    bool drawn = false;
+    r.drawing("map", f1, &drawn);
+    ok("repeats: the first frame whole, shown", r.st().state == "showing" && drawn);
+    const unsigned long long first = r.received();
+    bool steady = true;
+    for (int s = 0; s < 10; s++) {
+        r.pump(1000, &f1);
+        steady = steady && r.st().state == "showing";
+    }
+    ok("repeats: a static map's repeated picture keeps it showing past stall_ms, each repeat counted",
+       steady && r.map_layer()->params.visible && r.received() >= first + 150);
+    int fps = 0;
+    std::sscanf(r.st().page.c_str(), "Waze map \xe2\x80\x94 %d frames/s", &fps);
+    ok("repeats: the frame rate counts them, a frame each 65 ms", fps == 15 || fps == 16);
+
+    r.feed->set_stream(false, false, Picture::Shown);
+    r.pump(100, &f1);
+    const unsigned long long hidden = r.received();
+    r.pump(3000, &f2);
+    ok("hidden: nothing reaches the renderer, frames or repeats", r.received() == hidden && r.st().state == "idle");
+    r.feed->set_stream(true, false, Picture::Shown);
+    bool first_drawn = false, newest_first = false;
+    for (int step = 0; step < 300 && !first_drawn; step++) {
+        r.pump(5);
+        first_drawn = r.drawing("map", f2, &newest_first);
+    }
+    ok("shown again: the newest picture is what it draws first", first_drawn && newest_first);
+    r.pump(1500, &f2);
+    ok("shown again: showing", r.st().state == "showing");
+
+    r.svc.reset();
+    r.pump(100, &f2);
+    r.start();
+    r.pump(3000, &f2);
+    r.drawing("map", f2, &drawn);
+    ok("the renderer restarted: repeats alone bring the picture back", r.st().state == "showing" && drawn);
+
+    ok("another target", r.feed->set_target("panel"));
+    r.pump(1500, &f2);
+    r.drawing("panel", f2, &drawn);
+    ok("another target: repeats alone bring the picture", r.st().state == "showing" && r.st().target == "panel" && drawn);
+}
+
 int main()
 {
     signal(SIGPIPE, SIG_IGN);
@@ -277,8 +362,8 @@ int main()
     std::vector<uint8_t> b2 = f2, b3 = f3;
     r.feed->offer(&b2, 2, r.now);
     r.feed->offer(&b3, 3, r.now);
-    ok("a frame is taken without a copy: a same-size buffer comes back for each",
-       b2.size() == f2.size() && b3.size() == f3.size() && b3 == f2);
+    ok("a frame is taken without a copy: an earlier frame's buffer comes back for each, the last sent kept",
+       b2.size() == f2.size() && b3.size() == f3.size() && b2 == f1 && b3 == f1);
     r.pump(200);
     g = r.gpu.graph("map");
     bool newest = false, stale = false;
@@ -515,6 +600,7 @@ int main()
     ok("status log: a target alone", sl.due(a, t + 11400));
 
     guide_hold();
+    only_what_is_needed();
     std::printf(failures ? "%d FAILED\n" : "all ok\n", failures);
     return failures ? 1 : 0;
 }

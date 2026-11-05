@@ -485,10 +485,11 @@ share a 2D pass, and the passes' render order follows the stack exactly
   service. Clients reconnect by themselves (0.25, 0.5, 1, then every 2 s).
   They make their assets and layers again with their last settings:
   uniforms, mesh parts with their geometry and transforms, binds and
-  animations; and send their images and assets whole.
-- A client's layers go with its connection, then its assets. A video layer whose frames stop
-  for `stall_ms` stops wanting its slot, which is released after it fades
-  out and the linger.
+  animations; and send their images and assets whole, and a video layer's
+  last frame whole in place of its next repeat.
+- A client's layers go with its connection, then its assets. A video layer whose frames
+  (or repeats) stop for `stall_ms` stops wanting its slot, which is released
+  after it fades out and the linger.
 - On SIGTERM every target is unmapped and unfetched, the guide hold's
   included. If the service dies, the KOMBI's watchdog drops its content
   within about 10 s and systemd starts it again: the watchdog is per client

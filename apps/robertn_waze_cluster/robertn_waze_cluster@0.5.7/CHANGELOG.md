@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7
+
+The map's capture starts at boot after the head unit's media bus is up,
+ordered after BMW's own media services and never holding any of them up.
+Requires waze-on-cluster 0.8.6.
+
 ## 0.5.6
 
 When boot recovery removed a patch because the head unit kept restarting

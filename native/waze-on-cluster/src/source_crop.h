@@ -77,6 +77,15 @@ inline bool rect_needs_reset(const SourceCrop &c, uint32_t iw, uint32_t ih, uint
     return pw != iw || ph != ih;
 }
 
+/* Whether the pictures of a sequence of sw x sh need the per-picture
+ * decision (crop_picture, rect_needs_reset) under a converter set up for an
+ * input rect of iw x ih: the crop applies to the sequence, or the sequence
+ * needs another rect. An unknown sequence (0 x 0) does. */
+inline bool sequence_needs_check(const SourceCrop &c, uint32_t iw, uint32_t ih, uint32_t sw, uint32_t sh)
+{
+    return c.enabled() && (c.applies(sw, sh) || rect_needs_reset(c, iw, ih, sw, sh));
+}
+
 /* Whether a picture restarts the decoder at its sequence for its VPP input
  * rect. After a rect restart, pictures that still need another rect are
  * converted with VPP as it is set up, with one warning, until one fits it:

@@ -26,7 +26,9 @@ patch. So the first install on a HIGH F unit applies the patch again, as a
 fresh install does on a proven build (pending, through the same checks),
 to each of CarPlay and Android Auto whose file is exactly the original its
 trusted backup records (a record whose SHA-256 is the backup's and the
-file's). `/var/opt/waze-on-cluster/highf-repatched` names each of the two
+file's). A patch boot recovery removed after failed head-unit starts (its
+record says so) is the exception: it stays removed until its Patch button
+applies it. `/var/opt/waze-on-cluster/highf-repatched` names each of the two
 once an install applied it this way or found nothing to put back, or once
 its Patch or Remove patch button was used; an install that could not
 finish one leaves it for the next. Every later install leaves a removed
@@ -428,7 +430,7 @@ pending, which the Store shows.
 | the pristine proven build, no backup of ours | applies CarPlay's Patch button's patch (pending) | nothing |
 | a build outside the proven list, no backup of ours | nothing: a conflict (`untested carplay build`) | nothing |
 | a patch of ours, any configuration | brings it to CarPlay's Patch button's (pending), or nothing if it is already | reverts our edits (pending), drops our backup |
-| the original with our backup (CarPlay's Remove patch button was used) | nothing: the map stays off; the first install on HIGH F applies it again (pending; "Supported head units") | drops our backup |
+| the original with our backup (CarPlay's Remove patch button was used) | nothing: the map stays off; the first install on HIGH F applies it again (pending; "Supported head units"), except where boot recovery removed the patch after failed starts | drops our backup |
 | a change already pending | nothing (still reports the restart); after a removal's revert, applies again (a build outside the proven list stays reverted: a conflict) | a pending apply is undone (nothing pending); a pending revert becomes the removal's; our backup goes |
 | a patch of ours plus another tool's edit elsewhere | updates ours, keeps theirs | reverts ours, keeps theirs, drops our backup |
 | a build with an edit site not found or not recognised | nothing: a conflict | with our verified backup of the same build differing from it (`restorable`), writes the backup whole (pending) and drops it; else nothing |
@@ -961,7 +963,7 @@ this car` there.
 **The watcher** (`recovery.js`, `waze-on-cluster-recovery.service`, after
 the boot step) follows CarPlay by run (systemd's `InvocationID`). While a
 run is active it checks every second that its main PID is in `/proc` and
-asks systemd every 5 s, or at once when the PID is gone; while CarPlay is
+asks systemd every 60 s, or at once when the PID is gone; while CarPlay is
 down it asks every 5 s. A run that ended `failed` (a `Result` other than
 `success`) is a crash, counted once per run, also when it ended before the
 watcher first looked: unless `patchd` killed that run to activate a change

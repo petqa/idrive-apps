@@ -580,7 +580,8 @@ void Server::on_json(Client &c, const std::string &body, int64_t now_ms)
         send(c, cr::json_object({{"ev", cr::json_quote("hello")},
                                  {"proto", std::to_string(cr::kProtocolVersion)},
                                  {"backend", cr::json_quote(backend_)},
-                                 {"targets", cr::json_quote(targets)}}));
+                                 {"targets", cr::json_quote(targets)},
+                                 {"repeat", "1"}}));
         c.target_sent.clear();
         log_info("client %llu: %s", (unsigned long long)c.id, c.app.c_str());
         return;
@@ -603,6 +604,18 @@ void Server::on_json(Client &c, const std::string &body, int64_t now_ms)
     const uint32_t ref = (uint32_t)ref_d;
     auto it = c.refs.find(ref);
     Layer *l = it == c.refs.end() ? nullptr : comp_->layer(c.id, it->second);
+    if (op == "repeat") {
+        const bool video = l && std::string(l->kind()) == "video";
+        if (video)
+            static_cast<VideoLayer *>(l)->repeat(now_ms);
+        /* Answered at most once per ref, as frames are (on_frame). */
+        const std::string why = video ? "" : l ? "only a video layer repeats a frame" : "no such layer";
+        std::string &last = c.frame_error[l ? ref : 0];
+        if (!why.empty() && why != last)
+            error(c, op, ref, why);
+        last = why;
+        return;
+    }
     if (op == "drop") {
         auto a = c.assets.find(ref);
         if (a != c.assets.end()) {

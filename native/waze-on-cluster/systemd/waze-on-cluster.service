@@ -8,6 +8,16 @@ Requires=waze-on-cluster.socket
 # connection.
 Wants=cluster-render.socket
 After=local-fs.target waze-on-cluster.socket cluster-render.socket
+# The AVB bridge joins BMW's media bus once it is up: ufipc_daemon holds the
+# UFIPC channel (IASMediaBus) the bridge opens, avbstreamhandler sets up the
+# bus streams, stream 15 among them. Both are Type=forking and fork only
+# once that is done, so "after" means ready. Ordering only, never a
+# requirement: where either unit is missing or fails, this still starts.
+# BMW's boot already orders the two first (both are before early.target,
+# systemd-udev-trigger.service after it, sysinit.target and basic.target
+# after that); this line keeps it so without relying on that chain. No
+# head-unit unit is ordered after this service, so none starts any later.
+After=ufipc_daemon.service avbstreamhandler.service
 
 [Service]
 # hmi_5000 is in the video group, so this process can open
@@ -19,11 +29,6 @@ Group=hmi_5000
 # on the car: root could join media_transport.avb_streaming.15, hmi_5000
 # could not). tm_oap_app opens the cluster renderer's socket.
 SupplementaryGroups=mgu_ufipc tm_oap_app
-# Lets the receive threads, which only copy each packet of the phone's
-# stream into the decode queue, run at nice -5, the HMI's own level, so a
-# busy unit does not delay them; the decode thread stays at nice 0. The
-# stock media units grant LimitNICE or LimitRTPRIO the same way.
-LimitNICE=-5
 RuntimeDirectory=waze-on-cluster
 # World-traversable so the carplay uid can reach the FIFO (file group-restricted)
 # and the diagnostics uid can read status.json; the files set their own modes.

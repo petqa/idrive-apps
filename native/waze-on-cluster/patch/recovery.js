@@ -160,8 +160,11 @@ var THRESHOLD = { proven: 2, unknown: 2, unproven: 1 };
  * within it. */
 var HEALTHY_MS = parseInt(process.env.WOC_RECOVERY_HEALTHY_MS, 10) || 60000;
 var TICK_MS = parseInt(process.env.WOC_RECOVERY_TICK_MS, 10) || 1000;
-/* systemctl is asked this often; between asks a tick only checks /proc. */
+/* systemctl is asked this often while the service is down; while its main
+ * PID is in /proc, which every tick checks, only every ALIVE_PROBE_MS, as a
+ * backstop. */
 var PROBE_MS = 5000;
+var ALIVE_PROBE_MS = 60000;
 var START_DELAYS_MS = [5000, 15000, 60000];
 /* How far a file's modification time may stray from the clock: file
  * systems stamp with a coarser one. */
@@ -486,6 +489,7 @@ function Recovery(opts) {
     this._run = '';             /* the active run, for the healthy timer */
     this._lastProbe = -Infinity;
     this._activeSince = null;   /* start of the current continuous-active run */
+    this._settled = null;       /* the run whose healthy minute needs nothing more */
     this._startAt = null;       /* when the scheduled start is due */
     /* This boot's ended run, crashes and starts, also kept here so a state
      * file that cannot be written neither repeats a crash nor lifts the start
@@ -495,16 +499,18 @@ function Recovery(opts) {
     this._starts = 0;
 }
 
+/* read: the state file was read, or there is none. */
 Recovery.prototype._load = function () {
+    var read = false;
     try {
         var st = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
         /* A state without unknown is 0.8.1's or older, counted by other
          * rules: its counts start again. */
         var legacy = !!st && typeof st === 'object' && !('unknown' in st);
         if (st && typeof st === 'object') return { fails: legacy ? 0 : st.fails || 0, unknown: legacy ? 0 : st.unknown || 0, arm: normArm(st.arm),
-            prev: normArm(st.prev), starts: st.starts || null, ended: st.ended || null };
-    } catch (e) {}
-    return { fails: 0, unknown: 0, arm: null, prev: null, starts: null, ended: null };
+            prev: normArm(st.prev), starts: st.starts || null, ended: st.ended || null, read: true };
+    } catch (e) { read = e.code === 'ENOENT'; }
+    return { fails: 0, unknown: 0, arm: null, prev: null, starts: null, ended: null, read: read };
 };
 
 /* Persist durably: the state must survive the reboot a crash can cause the
@@ -620,8 +626,8 @@ Recovery.prototype.whenRestored = function (cb) {
 
 /* One watcher poll. A run of the service is told by its InvocationID. While
  * a run is active a tick only checks that its main PID is in /proc, and asks
- * systemctl every PROBE_MS or once the PID is gone; while the service is
- * down it asks every PROBE_MS. A run that ended failed (Result not success)
+ * systemctl every ALIVE_PROBE_MS or once the PID is gone; while the service
+ * is down it asks every PROBE_MS. A run that ended failed (Result not success)
  * is a crash, once per run, unless patchd killed it to activate a change or
  * the system is stopping. A run a SIGKILL ended as a success (the tool's
  * carplay.service drop-in, SuccessExitStatus=SIGKILL) is no crash; unless
@@ -635,7 +641,7 @@ Recovery.prototype.tick = function (cb) {
     if (this._busy || this.restoring) { cb({ action: 'skip' }); return; }
     var now = this._now();
     if (this._startAt !== null && now >= this._startAt) { this._startDue(cb); return; }
-    var fresh = now - this._lastProbe < PROBE_MS;
+    var fresh = now - this._lastProbe < (this._pid ? ALIVE_PROBE_MS : PROBE_MS);
     if (fresh && (!this._pid || this._alive(this._pid))) { cb({ action: this._healthy(now) }); return; }
     this._busy = true;
     this._probe(function (info) {
@@ -679,15 +685,19 @@ Recovery.prototype._ran = function () {
     if (this._armed(st) && !st.arm.ran) { st.arm.ran = true; this._save(st); }
 };
 
+/* A run's healthy minute confirms this boot's arm once. Only the watcher
+ * changes the arm once the run is up, so after the state was read (or the
+ * confirmation saved) the run needs no more reads. */
 Recovery.prototype._healthy = function (now) {
-    if (this._activeSince === null || now - this._activeSince < this.healthyMs) return 'watch';
+    if (this._activeSince === null || now - this._activeSince < this.healthyMs || this._settled === this._run) return 'watch';
     var st = this._load();
     if (this._armed(st) && !st.arm.confirmed) {
         st.arm.confirmed = true;
-        this._save(st);
+        if (this._save(st)) this._settled = this._run;
         this._log(this.target.name + ' healthy');
         return 'confirmed';
     }
+    if (st.read) this._settled = this._run;
     return 'watch';
 };
 

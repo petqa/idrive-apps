@@ -44,6 +44,7 @@ lacks.
 | `animate` | `ref`, `part`, `anim`, `property`, `name`, `keys`, `loop`, `interp` ([below](#animations)) |
 | `stop` | `ref`, `anim` |
 | `drop` | `ref`: a layer, or an asset no layer samples (else refused: `asset in use`) |
+| `repeat` | `ref` (a video layer): a frame whose atlas is the layer's last frame's, byte for byte, in place of that frame; to a service whose hello has `repeat` 1 |
 | `status` | — (answered by a `status` event) |
 
 Layer fields (all optional):
@@ -96,7 +97,9 @@ depth, never colour: the layers below it show.
 Frames (`F`):
 - **video**: no rects, and the whole 4:2:0 atlas: Y (w x h), then U and V
   side by side (w/2 each) in h/2 rows; `w * h * 3/2` bytes. Each frame
-  replaces the layer's frame not yet written.
+  replaces the layer's frame not yet written. A `repeat` counts as a frame
+  (it keeps the layer from stalling), with nothing to write; before the
+  layer's first frame it does nothing.
 - **image**: RGBA rows, straight alpha. With rects, each rect's rows packed
   one rect after another; with none, the whole image.
 - **asset**: the same, RGBA or one byte a pixel (`r8`).
@@ -177,7 +180,7 @@ Every JSON message has `ev`.
 
 | ev | Fields | When |
 |---|---|---|
-| `hello` | `proto`, `backend` (`id7`, or `id8` on iDrive 8), `targets` (`map:1088x480,panel:1920x720,hud:800x480`; on iDrive 8 `map:874x749,hud:353x203,guide:702x213,widget:2240x896`) | after the client's hello |
+| `hello` | `proto`, `backend` (`id7`, or `id8` on iDrive 8), `targets` (`map:1088x480,panel:1920x720,hud:800x480`; on iDrive 8 `map:874x749,hud:353x203,guide:702x213,widget:2240x896`), `repeat` (1: takes `repeat`) | after the client's hello |
 | `layer` | `ref`, `state`, `reason` | the layer's state changed |
 | `target` | `target`, `state`, `holder`, `reason`, `retry_in_ms`, `rendering`, `guide_disabled` | a target's state changed |
 | `budget` | `cap_kb_per_s`, `max_kb_per_s`, `floor_kb_per_s`, `reason` | the upload cap changed |

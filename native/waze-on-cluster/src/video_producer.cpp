@@ -2,12 +2,8 @@
 // Copyright (C) 2026 Robert Nisipeanu
 #include "video_producer.h"
 
-#include <cerrno>
 #include <cstdio>
-#include <cstring>
 #include <fcntl.h>
-#include <sys/resource.h>
-#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -17,7 +13,6 @@
 namespace woc {
 
 using crk::atlas_height;
-using crk::round_levels;
 
 namespace {
 
@@ -145,8 +140,11 @@ std::string VideoProducer::probe_report() const
     if (const int64_t w = keyframe_wait_ms(cld::now_ms()))
         std::snprintf(wait, sizeof wait, "; the stream arrives with no keyframe and nothing decoded for %lld s",
                       (long long)(w / 1000));
+    crk::Spread pack, vpp;
     {
         std::lock_guard<std::mutex> lock(decode_mutex_);
+        pack = decoder_.pack_us();
+        vpp = decoder_.vpp_us();
         const RtpH264::Stats &st = rtp_.stats();
         char line[448];
         std::snprintf(line, sizeof line,
@@ -163,12 +161,17 @@ std::string VideoProducer::probe_report() const
     }
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
-        char line[320];
+        char line[512];
         std::snprintf(line, sizeof line,
-                      "rounding: %u bits a level on the decoder thread, %lld us a frame (max %lld)\n"
+                      "vpp: %lld us a picture (max %lld) waiting for VPP, the copy to system memory included, "
+                      "and for its decode unless src_crop's check waited for it\n"
+                      "packing: %u bits a level, %lld us a picture (max %lld) to compare with the last and pack; "
+                      "%llu pictures the same as the last, not packed\n"
                       "backlog: the oldest packet waiting %lld ms, the longest wait %lld ms; %llu frames decoded "
                       "without a picture to catch up%s\n",
-                      cfg_.tex_level_bits, (long long)round_us_.mean(), (long long)round_us_.max,
+                      (long long)vpp.mean(), (long long)vpp.max, cfg_.tex_level_bits, (long long)pack.mean(),
+                      (long long)pack.max,
+                      (unsigned long long)same_total_,
                       (long long)(queue_.oldest_wait_us() / 1000), (long long)(backlog_.max_wait_us() / 1000),
                       (unsigned long long)backlog_.skipped_total(),
                       backlog_.behind(cld::now_ms()) ? "; the decoder is behind the stream" : "");
@@ -179,15 +182,6 @@ std::string VideoProducer::probe_report() const
 
 void VideoProducer::receive(const uint8_t *data, size_t len, int source)
 {
-    static thread_local bool reniced = false;
-    if (!reniced) {
-        reniced = true;
-        if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), kReceiveNice) == 0)
-            log_info("%s: receive thread at nice %d", source_name(source), kReceiveNice);
-        else
-            log_warn("%s: receive thread left at its priority (nice %d: %s)", source_name(source), kReceiveNice,
-                     std::strerror(errno));
-    }
     /* A frame's packets share their RTP timestamp. */
     bool frame_start = false;
     if (len >= 12 && (data[0] & 0xc0) == 0x80) {
@@ -286,7 +280,8 @@ void VideoProducer::on_nal(const uint8_t *data, size_t len, bool end_of_au)
 
 bool VideoProducer::start_decoder(std::string *err)
 {
-    if (!decoder_.init(cfg_.drm_device.c_str(), cfg_.tex_width, cfg_.tex_height, err, cfg_.src_crop)) {
+    if (!decoder_.init(cfg_.drm_device.c_str(), cfg_.tex_width, cfg_.tex_height, cfg_.tex_level_bits, cfg_.gpu_copy, err,
+                       cfg_.src_crop)) {
         std::lock_guard<std::mutex> flock(frame_mutex_);
         last_err_ = *err;
         decode_errs_++;
@@ -321,7 +316,7 @@ void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
 
 void VideoProducer::on_frame(const VideoFrame &f)
 {
-    if (!f.atlas) {
+    if (!f.atlas && !f.same) {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         const std::string line = health_.frame(cld::now_ms(), f.corrupted, gaps_.after_loss());
         if (!line.empty())
@@ -332,16 +327,10 @@ void VideoProducer::on_frame(const VideoFrame &f)
         decoded_total_++;
         return;
     }
-    /* Rounded here, in place, on the decoder thread, so neither the main loop
-     * nor the renderer spends time on it; the decoder's buffer then becomes
-     * the newest frame and the replaced one goes back to the decoder. */
-    const int64_t t0 = now_us();
-    if (cfg_.tex_level_bits)
-        round_levels(f.atlas->data(), f.atlas->data(), f.atlas->size(), cfg_.tex_level_bits);
-    const int64_t round_us = now_us() - t0;
-    /* the atlas starts with the luma plane */
+    /* the atlas starts with the luma plane; the same picture again has not
+     * changed and is as blank as it was */
     const bool sized = f.w == cfg_.tex_width && f.h == cfg_.tex_height;
-    const bool changed = sized && change_.changed(f.atlas->data());
+    const bool changed = sized && f.atlas && change_.changed(f.atlas->data());
     std::lock_guard<std::mutex> lock(frame_mutex_);
     const std::string line = health_.frame(cld::now_ms(), f.corrupted, gaps_.after_loss());
     if (!line.empty())
@@ -352,27 +341,36 @@ void VideoProducer::on_frame(const VideoFrame &f)
         tally_.frame(now, changed, change_.blank());
         last_frame_ms_ = now;
     }
-    back_.swap(*f.atlas);
-    if (!back_dirty_ && ready_[1] >= 0) {
+    if (!back_dirty_ && !repeat_ && ready_[1] >= 0) {
         const char b = 1;
         ssize_t w = write(ready_[1], &b, 1);
         (void)w;
     }
-    round_us_.add(round_us);
-    back_w_ = f.w;
-    back_h_ = f.h;
-    back_dirty_ = true;
+    if (f.atlas) {
+        /* The decoder's buffer becomes the newest frame and the replaced one
+         * goes back to the decoder. */
+        back_.swap(*f.atlas);
+        back_w_ = f.w;
+        back_h_ = f.h;
+        back_dirty_ = true;
+        repeat_ = false;
+    } else {
+        same_total_++;
+        repeat_ = !back_dirty_;   /* a frame still to be taken is this picture */
+    }
     back_id_ = decoded_total_.fetch_add(1) + 1;
 }
 
-bool VideoProducer::take(std::vector<uint8_t> *frame, uint64_t *id)
+bool VideoProducer::take(std::vector<uint8_t> *frame, uint64_t *id, bool *same)
 {
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (!back_dirty_ || back_w_ != cfg_.tex_width || back_h_ != cfg_.tex_height)
+    *same = !back_dirty_;
+    if (back_dirty_ && back_w_ == cfg_.tex_width && back_h_ == cfg_.tex_height)
+        frame->swap(back_);
+    else if (!repeat_)
         return false;
-    frame->swap(back_);
     *id = back_id_;
-    back_dirty_ = false;
+    back_dirty_ = repeat_ = false;
     char drain[8];
     while (ready_[0] >= 0 && read(ready_[0], drain, sizeof drain) > 0) {
     }
