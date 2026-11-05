@@ -77,24 +77,28 @@ test:
 test-bin: $(CPP_TESTS)
 	$(MAKE) -C $(CR) test-kit-bin BUILD=$(abspath $(BUILD))/kit
 
+# The patchers, patchd and boot recovery under the umask an installer may
+# set (077): every file they replace keeps the mode its service needs.
 test-node:
-	$(NODE) patch/test/locate_test.js
-	$(NODE) patch/test/mutation_test.js
-	$(NODE) patch/test/undo_test.js
-	$(NODE) patch/test/patch_test.js
-	$(NODE) patch/test/patchd_patch_test.js
-	$(NODE) patch/test/patchd_activate_test.js
-	$(NODE) patch/test/patchd_dlt_test.js
-	$(NODE) patch/test/patchd_reboot_test.js
-	$(NODE) patch/test/dlt_capture_test.js
-	$(NODE) patch/test/recovery_test.js
-	$(NODE) patch/test/journal_keep_test.js
-	$(NODE) patch/test/logs_test.js
-	$(NODE) patch/test/logs_fw_test.js
-	$(NODE) patch/test/units_test.js
-	$(NODE) patch/test/aapd_test.js
-	$(NODE) patch/test/head_unit_test.js
-	$(NODE) patch/test/aapd_aa2144_test.js
+	umask 077 && $(NODE) patch/test/locate_test.js
+	umask 077 && $(NODE) patch/test/permissions_test.js
+	umask 077 && $(NODE) patch/test/file_mode_test.js
+	umask 077 && $(NODE) patch/test/mutation_test.js
+	umask 077 && $(NODE) patch/test/undo_test.js
+	umask 077 && $(NODE) patch/test/patch_test.js
+	umask 077 && $(NODE) patch/test/patchd_patch_test.js
+	umask 077 && $(NODE) patch/test/patchd_activate_test.js
+	umask 077 && $(NODE) patch/test/patchd_dlt_test.js
+	umask 077 && $(NODE) patch/test/patchd_reboot_test.js
+	umask 077 && $(NODE) patch/test/dlt_capture_test.js
+	umask 077 && $(NODE) patch/test/recovery_test.js
+	umask 077 && $(NODE) patch/test/journal_keep_test.js
+	umask 077 && $(NODE) patch/test/logs_test.js
+	umask 077 && $(NODE) patch/test/logs_fw_test.js
+	umask 077 && $(NODE) patch/test/units_test.js
+	umask 077 && $(NODE) patch/test/aapd_test.js
+	umask 077 && $(NODE) patch/test/head_unit_test.js
+	umask 077 && $(NODE) patch/test/aapd_aa2144_test.js
 
 test-cpp: $(CPP_TESTS)
 	$(BUILD)/host/nal_reader_test

@@ -65,6 +65,7 @@ var path = require('path');
 var locator = require('./carplay_locate.js');
 var headUnit = require('./head_unit.js');
 var record = require('./patch_record.js');
+var fileMode = require('./file_mode.js');
 
 /* Builds proven as shipped, by GNU build-id. A first edit of one needs the
  * whole file to be the shipped one, and anything else counts as modified. A
@@ -221,7 +222,7 @@ function cmdStatus(target) {
     header(target, buf, c);
     var p;
     try { p = restorePlan(target, buf, c); } catch (e) { p = { err: e.message }; }
-    line('restorable', p.err ? 'no (' + p.err + ')' : p.b.other ? 'no (another build: ' + p.b.other + ')' : !p.out.equals(buf) ? 'yes' : 'no');
+    line('restorable', p.err ? 'no (' + p.err + ')' : p.b.other ? 'no (another build: ' + p.b.other + ')' : !p.out.equals(buf) || modeOnly(target, buf, p) ? 'yes' : 'no');
     var bad = unrecognised(c);
     if (!c.ok) { line('known', 'NO — ' + c.reason); return; }
     /* A backup apply would refuse (another build's original, or
@@ -400,8 +401,10 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
         fs.writeFileSync(bakTmp, buf, { mode: 0o600 });
         fsyncFile(bakTmp);
         if (!fs.readFileSync(bakTmp).equals(buf)) { try { fs.unlinkSync(bakTmp); } catch (e) {} die('backup verification failed; no change made'); }
+        var origStat = fs.statSync(target);   /* the original's mode and owner, which every later write gives carplay */
         fs.writeFileSync(metaTmp, JSON.stringify({ target: path.resolve(target), version: label(c), buildId: c.loc.buildId,
-            sha256_original: sha256(buf), savedAt: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
+            sha256_original: sha256(buf), mode: origStat.mode & 0o7777, uid: origStat.uid, gid: origStat.gid,
+            savedAt: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
         fsyncFile(metaTmp);
         fs.renameSync(metaTmp, metaPath(target));
         fs.renameSync(bakTmp, bak);
@@ -446,7 +449,10 @@ function cmdApply(target, panel, capture, sink, res, safe, yes, unproven) {
     });
 
     var rec = { patched: true, proven: !!PROVEN[loc.buildId] };
-    if (changed.length === 0) { process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(target, rec); return; }
+    if (changed.length === 0) {
+        repairMode(target, yes);
+        process.stdout.write('nothing to do; already in the requested state\n'); record.ensure(target, rec); return;
+    }
 
     /* The edited image must read as exactly the requested state, at the same
      * sites, changed only in the edit regions, before it is written. */
@@ -491,7 +497,10 @@ function cmdRevert(target, yes, force, dropBackup) {
     try { p = restorePlan(target, cur, classify(cur)); } catch (e) { p = { err: e.message }; }
     if (p.err) die('backup ' + bak + ' is not a verified original (' + p.err + '); refusing to restore it');
     var b = p.b, orig = b.buf;
-    if (cur.equals(orig)) { process.stdout.write('already at the original; nothing to do\n'); record.ensure(target, { patched: false }); drop(); return; }
+    if (cur.equals(orig)) {
+        if (modeOnly(target, cur, p)) repairMode(target, yes);
+        process.stdout.write('already at the original; nothing to do\n'); record.ensure(target, { patched: false }); drop(); return;
+    }
     /* Another build (a firmware update replaced carplay and left the old
      * backup behind): restoring would downgrade it. */
     if (b.other && !force) {
@@ -532,26 +541,41 @@ function cmdVerify(target) {
         ', res ' + (c.res.state === 'patched' ? c.res.res.w + 'x' + c.res.res.h : 'stock') + '\n');
 }
 
-/* Write by atomic rename so a crash mid-write cannot leave carplay half
- * patched; fall back to in-place rewrite on a cross-device/busy rename. The
- * caller remounts / read-write around this (deploy's remount window). */
 function fsyncFile(path) {
     var fd = fs.openSync(path, 'r+');
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+/* carplay's mode and owner (file_mode.js): its original's, recorded with
+ * the backup, at least 0755. */
+function wantedMode(target) {
+    var meta = null;
+    try { meta = JSON.parse(fs.readFileSync(metaPath(target), 'utf8')); } catch (e) {}
+    return fileMode.wanted(target, meta, fileMode.EXEC);
+}
+
+/* Whether target holds exactly the verified pristine original but
+ * carplay.service's user cannot run it: a revert sets only its mode. */
+function modeOnly(target, cur, p) {
+    return !p.err && !p.b.other && cur.equals(p.b.buf) && !notPristine(p.bc || classify(p.b.buf), p.b.buf) && fileMode.lacks(target, fileMode.EXEC);
+}
+
+/* target given its original's mode and owner, with --yes, when
+ * carplay.service's user cannot run it. */
+function repairMode(target, yes) {
+    if (!fileMode.lacks(target, fileMode.EXEC)) return;
+    var want = wantedMode(target), fix = fileMode.mismatch(target, want);
+    if (!yes) die(target + ' has ' + fix + '; pass --yes to set them');
+    try { fileMode.repair(target, want); } catch (e) { die('setting ' + target + '\'s mode and owner: ' + e.message); }
+    process.stdout.write('set ' + target + '\'s mode and owner (it had ' + fix + ')\n');
+}
+
+/* Write by atomic rename so a crash mid-write cannot leave carplay half
+ * patched; fall back to in-place rewrite on a cross-device/busy rename.
+ * Either way carplay gets its mode and owner explicitly (file_mode.js). The
+ * caller remounts / read-write around this (deploy's remount window). */
 function writeInPlace(target, buf) {
-    var tmp = target + '.woc-tmp';
-    var st;
-    try { st = fs.statSync(target); } catch (e) { st = { mode: 0o755 }; }
-    fs.writeFileSync(tmp, buf, { mode: st.mode & 0o777 });
-    fsyncFile(tmp);   /* the bytes must be on disk before the rename */
-    try { fs.renameSync(tmp, target); }
-    catch (e) {
-        try { fs.unlinkSync(tmp); } catch (e2) {}
-        var fd = fs.openSync(target, 'r+');
-        try { fs.writeSync(fd, buf, 0, buf.length, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    }
+    try { fileMode.replace(target, buf, wantedMode(target), true); } catch (e) { die('writing ' + target + ': ' + e.message); }
 }
 
 function onlyRegionsDiffer(a, b, regions) {

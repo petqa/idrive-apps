@@ -56,8 +56,10 @@ function unit() {
     var d = fs.mkdtempSync(path.join(os.tmpdir(), 'woc-aa-'));
     dirs.push(d);
     var t = { d: d, bin: path.join(d, 'aapd'), conf: path.join(d, 'aapd.conf'), coding: path.join(d, 'coding'), df: path.join(d, 'df') };
-    fs.writeFileSync(t.bin, SRC, { mode: 0o755 });
-    fs.writeFileSync(t.conf, SRCCONF, { mode: 0o644 });
+    fs.writeFileSync(t.bin, SRC);
+    fs.chmodSync(t.bin, 0o755);
+    fs.writeFileSync(t.conf, SRCCONF);
+    fs.chmodSync(t.conf, 0o644);
     fs.writeFileSync(t.coding, coding(7));
     setFree(t, 1 << 30);
     return t;
@@ -80,6 +82,36 @@ function onlyEdits(a, b) {
     }
     return a.length === b.length;
 }
+
+/* ---- modes under umask 077: aapd runs as cia_13006 ---- */
+(function modeTests() {
+    var mask = process.umask(0o077);
+    function mode(f) { return fs.statSync(f).mode & 0o7777; }
+    function modes(t) { return mode(t.bin).toString(8) + ' ' + mode(t.conf).toString(8); }
+    try {
+        var t = unit(), owner = fs.statSync(t.bin);
+        var r = patcher(t, ['apply', '--yes']);
+        ok('umask 077: apply writes aapd 0755 and aapd.conf 0644, owner kept; the records keep the originals\' modes',
+            r.code === 0 && modes(t) === '755 644' && fs.statSync(t.bin).uid === owner.uid && fs.statSync(t.bin).gid === owner.gid &&
+            JSON.parse(fs.readFileSync(t.bin + '.woc-orig.json', 'utf8')).mode === 0o755 && JSON.parse(fs.readFileSync(t.conf + '.woc-orig.json', 'utf8')).mode === 0o644,
+            r.out + ' ' + modes(t));
+        fs.chmodSync(t.bin, 0o700); fs.chmodSync(t.conf, 0o600);
+        ok('umask 077: an apply with nothing to change refuses to set the modes without --yes', patcher(t, ['apply']).code === 1 && modes(t) === '700 600');
+        r = patcher(t, ['apply', '--yes']);
+        ok('umask 077: an apply with nothing to change sets aapd 0755 and aapd.conf 0644', r.code === 0 && modes(t) === '755 644', r.out + ' ' + modes(t));
+        fs.chmodSync(t.bin, 0o700); fs.chmodSync(t.conf, 0o600);
+        fs.writeFileSync(t.bin + '.woc-tmp', 'cut short', { mode: 0o600 });
+        r = patcher(t, ['revert', '--yes']);
+        ok('umask 077: revert over 0700/0600 and a stale temporary file writes the originals at 0755 and 0644', r.code === 0 && sha(t.bin) === sha(SRC) &&
+            sha(t.conf) === sha(SRCCONF) && modes(t) === '755 644' && !fs.existsSync(t.bin + '.woc-tmp'), r.out + ' ' + modes(t));
+        fs.chmodSync(t.bin, 0o700); fs.chmodSync(t.conf, 0o600);
+        r = patcher(t, ['revert', '--yes']);
+        ok('umask 077: revert of the originals at 0700/0600 sets 0755 and 0644, bytes untouched', r.code === 0 && sha(t.bin) === sha(SRC) && modes(t) === '755 644', r.out + ' ' + modes(t));
+        fs.chmodSync(t.bin, 0o555); fs.chmodSync(t.conf, 0o444);
+        r = patcher(t, ['revert']);
+        ok('originals at 0555/0444, which aapd\'s user can run and read, keep their modes', r.code === 0 && modes(t) === '555 444', r.out + ' ' + modes(t));
+    } finally { process.umask(mask); }
+})();
 
 /* ---- the patcher ---- */
 (function patcherTests() {

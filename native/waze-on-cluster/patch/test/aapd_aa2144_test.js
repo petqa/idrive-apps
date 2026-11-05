@@ -217,6 +217,43 @@ function onlyEdits(a, b) {
     ok('status after revert: original again, nothing restorable', /geometry:\s+ORIGINAL/.test(status(t)) && /restorable:\s+no/.test(status(t)));
 })();
 
+/* The service runs as a different user. Correct bytes alone are not a
+ * working patch: apply, revert and their no-op paths must preserve access,
+ * including when an install hook inherits a restrictive umask. */
+(function permissionTests() {
+    [0o022, 0o077].forEach(function (mask) {
+        var savedMask = process.umask(mask);
+        try {
+            var t = unit();
+            fs.chmodSync(t.bin, 0o755);
+            fs.chmodSync(t.conf, 0o644);
+            var owner = fs.statSync(t.bin), confOwner = fs.statSync(t.conf);
+            function usable() {
+                var b = fs.statSync(t.bin), c = fs.statSync(t.conf);
+                return (b.mode & 0o777) === 0o755 && (c.mode & 0o777) === 0o644 &&
+                    b.uid === owner.uid && b.gid === owner.gid && c.uid === confOwner.uid && c.gid === confOwner.gid;
+            }
+            var label = 'umask ' + mask.toString(8) + ': ';
+            var r = patcher(t, ['apply', '--yes', '--experimental']);
+            ok(label + 'apply preserves service access and ownership', r.code === 0 && usable(), r.out);
+            var patched = [sha(t.bin), sha(t.conf)];
+            fs.chmodSync(t.bin, 0o700);
+            fs.chmodSync(t.conf, 0o600);
+            r = patcher(t, ['apply', '--yes']);
+            ok(label + 'no-op apply repairs service access without changing bytes', r.code === 0 && usable() &&
+                sha(t.bin) === patched[0] && sha(t.conf) === patched[1], r.out);
+            r = patcher(t, ['revert', '--yes']);
+            ok(label + 'revert restores bytes, service access and ownership', r.code === 0 && usable() &&
+                sha(t.bin) === sha(SRC) && sha(t.conf) === sha(SRCCONF), r.out);
+            fs.chmodSync(t.bin, 0o700);
+            fs.chmodSync(t.conf, 0o600);
+            r = patcher(t, ['revert', '--yes']);
+            ok(label + 'no-op revert repairs service access without changing bytes', r.code === 0 && usable() &&
+                sha(t.bin) === sha(SRC) && sha(t.conf) === sha(SRCCONF), r.out);
+        } finally { process.umask(savedMask); }
+    });
+})();
+
 /* ---- refusals: nothing is written on a wrong coding, build, anchor,
  * aapd.conf, backup or disk ---- */
 (function refusalTests() {

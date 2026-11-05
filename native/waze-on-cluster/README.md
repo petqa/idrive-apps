@@ -518,6 +518,15 @@ loaded, a SIGKILL is a clean exit.
 `revert` restores any binary of the backup's build
 (`/usr/bin/carplay.woc-orig`), and refuses another build (a firmware update)
 unless given `--force`.
+Every write of carplay, aapd or aapd.conf (apply, revert, boot recovery's
+restore) gives the file its original's owner and mode, recorded with the
+backup, with at least 0755 for carplay and aapd and 0644 for aapd.conf, set
+explicitly on the new file and checked before it replaces the old one,
+whatever the umask it runs under. carplay and aapd run as their own users:
+a carplay left `0700` fails to start (`status=203/EXEC`) and the head unit
+restarts in a loop. An apply or revert that finds nothing to change, and
+boot recovery before the service starts, give a file the service's user
+cannot run or read its original's mode and owner.
 
 ## The Android Auto patch
 

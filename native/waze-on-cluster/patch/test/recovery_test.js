@@ -121,10 +121,13 @@ function makeWorld(opts) {
      * no record), 'none' (stock, no backup). */
     w.install = (name, kind) => {
         const t = T[name], b = w.bin[name] = synthetic(name + kind);
-        fs.writeFileSync(t.target, kind === 'original' || kind === 'none' ? b.original : b.patched, { mode: 0o755 });
+        /* The modes the firmware ships, whatever the umask the tests run under. */
+        fs.writeFileSync(t.target, kind === 'original' || kind === 'none' ? b.original : b.patched);
+        fs.chmodSync(t.target, 0o755);
         if (kind !== 'none') backup(t.target, b.original);
         if (name === 'aapd') {
             fs.writeFileSync(t.files[1], kind === 'original' || kind === 'none' ? CONF.original : CONF.patched);
+            fs.chmodSync(t.files[1], 0o644);
             if (kind !== 'none') backup(t.files[1], CONF.original);
         }
         if (kind === 'proven' || kind === 'unproven' || kind === 'original') record.write(t.target, { patched: kind !== 'original', proven: kind === 'proven' });
@@ -579,7 +582,7 @@ test('aapd.conf another file than its backup is left while aapd is restored', as
     assert.strictEqual(fs.readFileSync(w.T.aapd.files[1], 'utf8'), '{"OTHER":1}\n');
 });
 
-test('the restore keeps the mode, leaves no temporary file, clears the pending marker and leaves / read-only', async () => {
+test('the restore sets carplay to 0755, leaves no temporary file, clears the pending marker and leaves / read-only', async () => {
     const w = makeWorld();
     w.install('carplay', 'unproven');
     fs.chmodSync(w.T.carplay.target, 0o751);
@@ -588,9 +591,207 @@ test('the restore keeps the mode, leaves no temporary file, clears the pending m
     let outcome = null;
     await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (err, o) => { assert.ifError(err); outcome = o; res(); }));
     assert.strictEqual(outcome, 'restored');
-    assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o777, 0o751);
+    assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o777, 0o755);
     assert(!fs.existsSync(w.T.carplay.target + '.woc-tmp') && !fs.existsSync(w.T.carplay.pending) && !fs.existsSync(w.T.carplay.running));
     assert(ro());
+});
+
+test('recovery under umask 077 sets 0755 even with a restrictive temporary file and keeps ownership', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'unproven');
+    const file = w.T.carplay.target, owner = fs.statSync(file);
+    fs.chmodSync(file, 0o700);
+    fs.writeFileSync(file + '.woc-tmp', 'interrupted restore', { mode: 0o600 });
+    const mask = process.umask(0o077);
+    try {
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 1, (err, outcome) => {
+            assert.ifError(err); assert.strictEqual(outcome, 'restored'); res();
+        }));
+    } finally { process.umask(mask); }
+    const after = fs.statSync(file);
+    assert.strictEqual(after.mode & 0o7777, 0o755);
+    assert.strictEqual(after.uid, owner.uid);
+    assert.strictEqual(after.gid, owner.gid);
+    assert.strictEqual(w.holds('carplay'), 'original');
+    assert(ro());
+});
+
+/* Permissions-only damage: an original carplay, aapd or aapd.conf that lacks
+ * the access its service's user needs, as a write under umask 077 leaves it. */
+async function underUmask077(fn) {
+    const mask = process.umask(0o077);
+    try { return await fn(); } finally { process.umask(mask); }
+}
+
+test('the boot step gives a verified original at 0700 its mode back at once, whatever the count; nothing else changes', async () => {
+    for (const fails of [0, 1]) {
+        const w = makeWorld();
+        w.install('carplay', 'original');
+        const file = w.T.carplay.target;
+        fs.chmodSync(file, 0o700);
+        fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails, unknown: 0, arm: null }));
+        const before = fs.statSync(file), rec = record.current(file);
+        const r = await underUmask077(() => startBoot(w.recovery('carplay', 'A', { repairModes: (cb) => recovery.repairModes(w.T.carplay, 1000, cb) })));
+        assert.strictEqual(r.action, 'idle');
+        assert.strictEqual(r.repaired, 1);
+        const after = fs.statSync(file);
+        assert.strictEqual(after.mode & 0o7777, 0o755);
+        assert.strictEqual(after.uid, before.uid);
+        assert.strictEqual(after.gid, before.gid);
+        assert.strictEqual(after.ino, before.ino);
+        assert.strictEqual(w.holds('carplay'), 'original');
+        assert.deepStrictEqual(record.current(file), rec);
+        assert(ro());
+        const again = await startBoot(w.recovery('carplay', 'B'));
+        assert.strictEqual(again.action, 'idle');
+        assert.strictEqual(again.repaired, undefined);
+    }
+});
+
+test('the watcher\'s start repairs it too; the original\'s recorded mode and owner are the ones set', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    const file = w.T.carplay.target, st = fs.statSync(file);
+    fs.writeFileSync(file + '.woc-orig.json', JSON.stringify({ target: file, sha256_original: sha(w.bin.carplay.original), mode: 0o775, uid: st.uid, gid: st.gid }));
+    fs.chmodSync(file, 0o700);
+    const r = await underUmask077(() => startBoot(w.recovery('carplay', 'A')));
+    assert.strictEqual(r.repaired, 1);
+    assert.strictEqual(fs.statSync(file).mode & 0o7777, 0o775);
+});
+
+test('aapd at 0700 and aapd.conf at 0600, each its verified original: 0755 and 0644 at the boot step', async () => {
+    const w = makeWorld();
+    w.install('aapd', 'original');
+    fs.chmodSync(w.T.aapd.files[0], 0o700);
+    fs.chmodSync(w.T.aapd.files[1], 0o600);
+    const r = await underUmask077(() => startBoot(w.recovery('aapd', 'A')));
+    assert.strictEqual(r.repaired, 2);
+    assert.strictEqual(fs.statSync(w.T.aapd.files[0]).mode & 0o7777, 0o755);
+    assert.strictEqual(fs.statSync(w.T.aapd.files[1]).mode & 0o7777, 0o644);
+    assert(ro());
+});
+
+test('with no backup of ours, the proven build\'s shipped carplay at 0700 is repaired; any other file is not', async () => {
+    for (const stock of [true, false]) {
+        const w = makeWorld();
+        w.install('carplay', 'none');
+        w.T.carplay.stock = (i, cur) => stock && cur.equals(w.bin.carplay.original);
+        fs.chmodSync(w.T.carplay.target, 0o700);
+        const r = await startBoot(w.recovery('carplay', 'A'));
+        assert.strictEqual(r.action, 'idle');
+        assert.strictEqual(r.repaired, stock ? 1 : undefined);
+        assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o7777, stock ? 0o755 : 0o700);
+        assert(ro());
+    }
+});
+
+test('our patch at 0700 is not repaired in place: it counts, and the restore at the threshold writes the original at 0755', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'proven');
+    fs.chmodSync(w.T.carplay.target, 0o700);
+    fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: THRESHOLD.proven, unknown: 0, arm: null }));
+    const r = await underUmask077(() => startBoot(w.recovery('carplay', 'A', { restore: (fails, cb) => recovery.restoreTarget(w.T.carplay, true, fails, cb, 1000) })));
+    assert.strictEqual(r.repaired, undefined);
+    assert.strictEqual(r.action, 'restored');
+    assert.strictEqual(w.holds('carplay'), 'original');
+    assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o7777, 0o755);
+    assert(ro());
+});
+
+test('the aapd restore under umask 077 writes aapd 0755 and aapd.conf 0644 over a stale temporary file', async () => {
+    const w = makeWorld();
+    w.install('aapd', 'unproven');
+    fs.chmodSync(w.T.aapd.files[0], 0o700);
+    fs.chmodSync(w.T.aapd.files[1], 0o600);
+    fs.writeFileSync(w.T.aapd.files[0] + '.woc-tmp', 'cut short', { mode: 0o600 });
+    await underUmask077(() => new Promise((res) => recovery.restoreTarget(w.T.aapd, true, 1, (err, o) => { assert.ifError(err); assert.strictEqual(o, 'restored'); res(); })));
+    assert.strictEqual(w.holds('aapd'), 'original');
+    assert(fs.readFileSync(w.T.aapd.files[1]).equals(CONF.original));
+    assert.strictEqual(fs.statSync(w.T.aapd.files[0]).mode & 0o7777, 0o755);
+    assert.strictEqual(fs.statSync(w.T.aapd.files[1]).mode & 0o7777, 0o644);
+    assert(!fs.existsSync(w.T.aapd.files[0] + '.woc-tmp'));
+    assert(ro());
+});
+
+test('the real boot step under umask 077 repairs an original carplay at 0700 before carplay starts', () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    fs.chmodSync(w.T.carplay.target, 0o700);
+    const mask = process.umask(0o077);
+    let r;
+    try { r = runBootStep(w, 'carplay', 'A'); } finally { process.umask(mask); }
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert(/carplay boot check: idle, mode and owner set on 1 file/.test(r.stdout), r.stdout);
+    assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o7777, 0o755);
+    assert(ro());
+});
+
+test('originals the service users can run and read (0555, 0444) are left alone: nothing remounted', async () => {
+    for (const name of ['carplay', 'aapd']) {
+        const w = makeWorld();
+        w.install(name, 'original');
+        fs.chmodSync(w.T[name].files[0], 0o555);
+        if (name === 'aapd') fs.chmodSync(w.T.aapd.files[1], 0o444);
+        const before = fs.existsSync(MOUNT_LOG) ? fs.readFileSync(MOUNT_LOG, 'utf8') : '';
+        const r = await startBoot(w.recovery(name, 'A'));
+        assert.strictEqual(r.repaired, undefined, name);
+        assert.strictEqual(fs.statSync(w.T[name].files[0]).mode & 0o7777, 0o555);
+        if (name === 'aapd') assert.strictEqual(fs.statSync(w.T.aapd.files[1]).mode & 0o7777, 0o444);
+        assert.strictEqual(fs.existsSync(MOUNT_LOG) ? fs.readFileSync(MOUNT_LOG, 'utf8') : '', before, name + ': no remount');
+    }
+});
+
+test('a stop during the boot step\'s mode repair waits for it: / read-only and the lock released before it exits', async () => {
+    const w = makeWorld();
+    w.install('carplay', 'original');
+    fs.chmodSync(w.T.carplay.target, 0o700);
+    const mounts = path.join(w.dir, 'mounts'), lockFile = path.join(w.dir, 'remount.lock'), mount = path.join(w.dir, 'mount');
+    fs.writeFileSync(mounts, '/dev/root / ext4 ro 0 0\n');
+    /* remount,rw takes / read-write and returns after 1.5 s */
+    fs.writeFileSync(mount, '#!' + process.execPath + '\nvar fs = require("fs"), rw = process.argv.indexOf("remount,rw") > 0;\n' +
+        'fs.writeFileSync(' + JSON.stringify(mounts) + ', "/dev/root / ext4 " + (rw ? "rw" : "ro") + " 0 0\\n");\n' +
+        'if (rw) setTimeout(function () {}, 1500);\n');
+    fs.chmodSync(mount, 0o755);
+    cp.execFileSync(mount, ['first']);   /* macOS checks a new executable at its first start */
+    fs.writeFileSync(mounts, '/dev/root / ext4 ro 0 0\n');
+    fs.writeFileSync(path.join(w.dir, 'boot_id'), 'A\n');
+    const child = cp.spawn(process.execPath, [RECOVERY_PATH, 'boot', 'carplay'], {
+        env: Object.assign({}, process.env, { WOC_CARPLAY: w.T.carplay.target, WOC_AAPD: w.T.aapd.target, WOC_AAPD_CONF: w.T.aapd.files[1],
+            WOC_RECOVERY_STATE: w.T.carplay.state, WOC_PATCH_SOCK: path.join(w.dir, 'shm', 'patch.sock'), WOC_BOOT_ID: path.join(w.dir, 'boot_id'),
+            WOC_MOUNT: mount, WOC_PROC_MOUNTS: mounts, WOC_REMOUNT_LOCK: lockFile }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const exited = new Promise((r) => child.on('exit', (code) => r(code)));
+    for (let t = Date.now(); !/\brw\b/.test(fs.readFileSync(mounts, 'utf8')) && Date.now() - t < 5000;) await new Promise((r) => setTimeout(r, 10));
+    assert(/\brw\b/.test(fs.readFileSync(mounts, 'utf8')), 'the repair took / read-write: ' + out);
+    child.kill('SIGTERM');
+    const code = await exited;
+    assert.strictEqual(code, 0, out);
+    assert(/\bro\b/.test(fs.readFileSync(mounts, 'utf8')), '/ read-only again: ' + out);
+    assert(!fs.existsSync(lockFile), 'the remount lock released');
+    assert.strictEqual(fs.statSync(w.T.carplay.target).mode & 0o7777, 0o755);
+    assert(!/boot check: (idle|armed)/.test(out), 'nothing decided after the stop: ' + out);
+});
+
+test('permissions-only recovery leaves unknown originals and firmware replacements untouched', async () => {
+    for (const other of [false, true]) {
+        const w = makeWorld();
+        w.install('carplay', 'original');
+        const file = w.T.carplay.target;
+        if (other) fs.writeFileSync(file, require('./synthetic_carplay.js').build().buf);
+        fs.chmodSync(file, 0o700);
+        const before = fs.readFileSync(file);
+        let outcome;
+        await new Promise((res) => recovery.restoreTarget(w.T.carplay, true, 2, (err, o) => {
+            assert.ifError(err); outcome = o; res();
+        }));
+        assert.strictEqual(outcome, other ? 'other' : 'original');
+        assert(fs.readFileSync(file).equals(before));
+        assert.strictEqual(fs.statSync(file).mode & 0o7777, 0o700);
+        assert(ro());
+    }
 });
 
 test('the restore defers to patchd\'s remount lock, and the boot step waits for it a bounded time', async () => {
@@ -1230,7 +1431,8 @@ test('the real boot step restores a patched carplay copy and aapd copy in about 
     if (!fs.existsSync(CARPLAY_BIN) || !fs.existsSync(AAPD_BIN) || !fs.existsSync(AAPD_CONF)) { console.log('     (skipped: CARPLAY_BIN, AAPD_BIN, AAPD_CONF not set)'); return; }
     const w = makeWorld();
     const cpt = w.T.carplay.target;
-    fs.writeFileSync(cpt, unprovenCarplay(fs.readFileSync(CARPLAY_BIN)), { mode: 0o755 });
+    fs.writeFileSync(cpt, unprovenCarplay(fs.readFileSync(CARPLAY_BIN)));
+    fs.chmodSync(cpt, 0o755);
     const unpatched = fs.readFileSync(cpt);
     cp.execFileSync(process.execPath, [CARPLAY_PATCH, 'apply', '--panel', 'high', '--unproven', '--yes', '--target', cpt], { stdio: 'ignore' });
     aapdPatcher(w)(['apply', '--dpi', '170', '--yes']);
@@ -1260,7 +1462,8 @@ test('the boot step restores what an older release patched where the locator now
     }
     require('./carplay_mutations.js')(fs.readFileSync(CARPLAY_BIN)).oldRelease().forEach((f) => {
         const w = makeWorld();
-        fs.writeFileSync(w.T.carplay.target, f.patched, { mode: 0o755 });
+        fs.writeFileSync(w.T.carplay.target, f.patched);
+        fs.chmodSync(w.T.carplay.target, 0o755);
         backup(w.T.carplay.target, f.original);
         fs.writeFileSync(w.T.carplay.state, JSON.stringify({ fails: 1, unknown: 0, arm: { boot: 'A', patch: 'unknown', crashes: 1 } }));
         const r = runBootStep(w, 'carplay', 'B');
