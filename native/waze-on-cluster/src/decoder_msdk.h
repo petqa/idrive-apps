@@ -143,6 +143,10 @@ public:
     bool feed(const uint8_t *data, size_t len, const FrameSink &cb, std::string *err, bool end_of_au = false,
               bool picture = true);
 
+    /* The next picture comes with its atlas even when it is the last one
+     * again. */
+    void forget_last();
+
     /* End of stream: decodes what is buffered and delivers every remaining
      * frame. The next feed() starts a new stream at its first SPS. */
     void flush(const FrameSink &cb);

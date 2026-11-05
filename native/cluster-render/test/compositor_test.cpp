@@ -100,7 +100,7 @@ struct Rig {
     int64_t now = 50000;
     int map = 0, panel = 1, hud = 2;
 
-    explicit Rig(uint64_t budget = 0, CompositorLimits lim = CompositorLimits())
+    explicit Rig(uint64_t budget = 0, CompositorLimits lim = CompositorLimits(), bool share_hud = false)
     {
         TargetSpec m;
         m.name = "map"; m.slot = 0x100; m.scene_id = 0x010004f0; m.width = W; m.height = H; m.linger_ms = 2000;
@@ -108,6 +108,7 @@ struct Rig {
         p.name = "panel"; p.slot = 0x203; p.scene_id = 0x01000400; p.width = 1920; p.height = 720; p.linger_ms = 2000;
         TargetSpec h;
         h.name = "hud"; h.slot = 0x323; h.scene_id = 0x01000400; h.width = 800; h.height = 480; h.linger_ms = 2000;
+        h.share = share_hud;
         slots.add(m);
         slots.add(p);
         slots.add(h);
@@ -168,6 +169,104 @@ static Rect R(int x, int y, uint32_t w, uint32_t h)
     Rect r;
     r.x = x; r.y = y; r.w = w; r.h = h;
     return r;
+}
+
+/* 20 s of a map at 30 fps on a 5500 KB/s budget, and the HUD's video
+ * (452x200 at 10 fps) on its share. hud: with the HUD layer; still: the
+ * map's picture stops changing after its first frame.
+ * Returns the map's flushes' bytes, one entry a flush, and the HUD's bytes. */
+struct ShareRun {
+    std::vector<uint64_t> map_flushes;
+    uint64_t map_age_ms = 0, map_frames = 0, map_bytes = 0;
+    uint64_t hud_bytes = 0;
+    int hud_flushes = 0;
+};
+static uint64_t gm_total(Rig &r)
+{
+    FakeGraph *g = r.g("map");
+    return g ? g->flushed_bytes : 0;
+}
+
+/* hud_shown false: a HUD layer that wants nothing (hidden); map false: no
+ * map layer, the HUD alone. */
+static ShareRun share_run(bool hud, bool still, bool hud_shown = true, bool map = true)
+{
+    Rig r(5500 * 1024, CompositorLimits(), true);
+    std::string err;
+    const uint32_t mid = map ? r.comp->add_video(1, r.map, params(Klass::Content, R(0, 0, W, H), true), VideoParams(), r.now, &err) : 0;
+    VideoParams hp;
+    hp.w = 452;
+    hp.h = 200;
+    hp.fps = 10;
+    LayerParams hlp = params(Klass::Content, R(174, 140, 452, 200), true);
+    hlp.visible = hud_shown;
+    const uint32_t hid = hud ? r.comp->add_video(2, r.hud, hlp, hp, r.now, &err) : 0;
+    VideoLayer *mv = map ? static_cast<VideoLayer *>(r.comp->layer(1, mid)) : nullptr;
+    VideoLayer *hv = hud ? static_cast<VideoLayer *>(r.comp->layer(2, hid)) : nullptr;
+    std::vector<uint8_t> hf((size_t)452 * 300);
+    ShareRun out;
+    uint64_t map_seen = 0, hud_seen = 0;
+    int hud_seen_flushes = 0;
+    for (int k = 0; k < 600; k++) {   /* 20 s at 30 fps */
+        const std::vector<uint8_t> f = frame(still ? 1 : k);
+        if (mv)
+            mv->offer(f.data(), r.now);
+        if (hv) {
+            for (size_t i = 0; i < hf.size(); i++)
+                hf[i] = (uint8_t)(i / 7 + k * 5);
+            hv->offer(hf.data(), r.now);
+        }
+        for (int t = 0; t < 33; t += 11) {
+            r.step(11);
+            if (k == 0 && t == 0) {
+                r.slots.on_shown(0x010004f0, r.now);
+                if (hud)
+                    r.slots.on_shown(0x01000400, r.now);
+            }
+        }
+        FakeGraph *gm = r.g("map"), *gh = r.g("hud");
+        if (gm && gm->flushed_bytes != map_seen) {
+            out.map_flushes.push_back(gm->flushed_bytes - map_seen);
+            map_seen = gm->flushed_bytes;
+        }
+        if (gh) {
+            hud_seen = gh->flushed_bytes;
+            hud_seen_flushes = gh->flushes;
+        }
+    }
+    out.hud_bytes = hud_seen;
+    out.hud_flushes = hud_seen_flushes;
+    out.map_bytes = gm_total(r);
+    out.map_age_ms = r.comp->write_stats(r.map).age_ms;
+    out.map_frames = r.comp->write_stats(r.map).frames;
+    return out;
+}
+
+static void share_hud()
+{
+    const uint64_t rate = 5500 * 1024, secs = 20;
+    char name[220];
+    const ShareRun alone = share_run(false, false), hidden = share_run(true, false, false), with = share_run(true, false);
+    std::snprintf(name, sizeof name, "HUD share, HUD off (no layer, or one that wants nothing): the map writes the same %zu "
+                  "flushes, %llu KB", alone.map_flushes.size(), (unsigned long long)(alone.map_bytes / 1024));
+    ok(name, alone.map_flushes == hidden.map_flushes && hidden.hud_bytes == 0);
+    std::snprintf(name, sizeof name, "HUD share, moving map: the map at least half (%llu KB), the HUD at most half (%llu KB, "
+                  "%d flushes) of %llu KB", (unsigned long long)(with.map_bytes / 1024), (unsigned long long)(with.hud_bytes / 1024),
+                  with.hud_flushes, (unsigned long long)(rate * secs / 1024));
+    ok(name, with.map_bytes >= rate * secs / 2 - 783360 && with.hud_bytes <= rate * secs / 2 + rate / 8 + 452 * 300);
+    ok("HUD share, moving map: the HUD smooth, about its 10 a second", with.hud_flushes >= 150 && with.hud_flushes <= 205);
+    ok("HUD share, moving map: what the HUD does not need goes to the map",
+       with.map_bytes + with.hud_bytes >= rate * (secs - 1) && with.map_bytes > alone.map_bytes - with.hud_bytes - rate / 4);
+
+    const ShareRun still_with = share_run(true, true);
+    std::snprintf(name, sizeof name, "HUD share, still map: the HUD at most 10 updates a second (%d flushes, %llu KB in 20 s)",
+                  still_with.hud_flushes, (unsigned long long)(still_with.hud_bytes / 1024));
+    ok(name, still_with.hud_flushes >= 150 && still_with.hud_flushes <= 205 && still_with.hud_bytes > 150ull * 452 * 300 / 2);
+    const ShareRun hud_alone = share_run(true, false, true, false);
+    std::snprintf(name, sizeof name, "HUD share, the HUD alone: no map writes, the HUD at its 10 a second (%d flushes, %llu KB)",
+                  hud_alone.hud_flushes, (unsigned long long)(hud_alone.hud_bytes / 1024));
+    ok(name, hud_alone.map_bytes == 0 && hud_alone.hud_flushes >= 150 && hud_alone.hud_flushes <= 205 &&
+                 hud_alone.hud_bytes <= rate * secs + rate / 4);
 }
 
 /* The video layer's atlas buffer and quad, and its packed quad, as shown. */
@@ -1443,6 +1542,7 @@ static void repeats()
 int main()
 {
     repeats();
+    share_hud();
     video_basics();
     packed_motion();
     failure_hold();

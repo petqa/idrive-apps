@@ -12,11 +12,17 @@
 # the renderer's and the capture's status files, this boot's journal of the
 # tools and of carplay (what the journal still holds), the list of boots,
 # the carplay patch probe (where its edit sites are in this carplay), the
-# tools' folders, their local settings, the time and the uptime. Anything
-# missing is left out. It changes nothing on the unit but the archive.
+# tools' folders, their local settings, the time and the uptime, and
+# wifi.txt: CarPlay's Wi-Fi band as patchd last read it, each P2P
+# interface's /proc/net/dev counters and the kernel's last 802.1X and DHCP
+# lines for them. Anything missing is left out. It changes nothing on the
+# unit but the archive.
 # POSIX sh, for the unit's shell.
 set -u
 umask 077
+
+PROC_NET_DEV=${WOC_PROC_NET_DEV:-/proc/net/dev}
+WIFI_BAND=${WOC_WIFI_FILE:-/dev/shm/waze-on-cluster/wifi-band.json}
 
 OUTDIR=/tmp
 if [ "${1:-}" = -o ] && [ -n "${2:-}" ]; then
@@ -78,6 +84,20 @@ if [ -f "$HERE/carplay_patch.js" ]; then
 fi
 
 ls -l /var/opt/cluster-render /var/opt/waze-on-cluster /var/opt/waze-on-cluster/journal /var/opt/waze-on-cluster/saved > "$DIR/ls.txt" 2>&1
+
+# The kernel's lines for the P2P interfaces: the journal's (the logs
+# service's group reads it), else dmesg's.
+P2P_LINES='(802_1X|DHCP)\[p2p-'
+{
+    echo "-- CarPlay Wi-Fi band (patchd, $WIFI_BAND)"
+    cat "$WIFI_BAND" 2>/dev/null || echo "(none)"
+    echo "-- P2P interfaces in $PROC_NET_DEV"
+    grep -E '^ *p2p-[^:]*:' "$PROC_NET_DEV" 2>/dev/null || echo "(none)"
+    echo "-- 802.1X and DHCP lines for P2P interfaces (the last 60)"
+    LINES=$(journalctl -k -b -o short-precise --no-pager 2>/dev/null | grep -E "$P2P_LINES" | tail -n 60)
+    [ -n "$LINES" ] || LINES=$(dmesg 2>/dev/null | grep -E "$P2P_LINES" | tail -n 60)
+    if [ -n "$LINES" ]; then echo "$LINES"; else echo "(none)"; fi
+} > "$DIR/wifi.txt"
 
 {
     echo "date: $(date 2>/dev/null)"

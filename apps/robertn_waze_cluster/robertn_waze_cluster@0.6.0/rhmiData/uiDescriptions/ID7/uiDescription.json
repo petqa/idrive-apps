@@ -23,6 +23,360 @@
             }
           ]
         },
+        "92": {
+          "type": "label",
+          "name": "wocHeadGeneral",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "General",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "62": {
+          "type": "dropDownMenu",
+          "name": "wocShowOn",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "cells": {
+            "HeaderText": {
+              "value": "Show on",
+              "type": "Text"
+            },
+            "SelectedItem": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "ItemText": {
+                "value": "Cluster",
+                "type": "Text"
+              }
+            },
+            {
+              "ItemText": {
+                "value": "HUD (experimental)",
+                "type": "Text"
+              }
+            },
+            {
+              "ItemText": {
+                "value": "Cluster and HUD (experimental)",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "21": {
+          "type": "label",
+          "name": "wocMap",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Cluster map: Off",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "35": {
+          "type": "checkBox",
+          "name": "wocGuide",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Hide BMW's turn box",
+                "type": "Text"
+              },
+              "eParam_RowSelected": {
+                "value": false,
+                "type": "Bool"
+              }
+            }
+          ]
+        },
+        "39": {
+          "type": "button",
+          "name": "wocLogs",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Logs",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "93": {
+          "type": "label",
+          "name": "wocHeadHud",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "HUD",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "50": {
+          "type": "label",
+          "name": "wocHud",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "HUD map: —",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "52": {
+          "type": "slider",
+          "name": "wocHudSize",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "TextDescription": {
+                "value": "Size: —",
+                "type": "Text"
+              },
+              "TextDescriptionVisible": {
+                "value": true,
+                "type": "Bool"
+              },
+              "MiddleIndicatorVisible": {
+                "value": false,
+                "type": "Bool"
+              },
+              "MinValue": {
+                "value": 0,
+                "type": "SInt"
+              },
+              "MaxValue": {
+                "value": 11,
+                "type": "SInt"
+              },
+              "NumberOfSteps": {
+                "value": 11,
+                "type": "SInt"
+              }
+            }
+          ]
+        },
+        "55": {
+          "type": "label",
+          "name": "wocHudPos",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Position: —",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "56": {
+          "type": "button",
+          "name": "wocHudLeft",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Move left",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "57": {
+          "type": "button",
+          "name": "wocHudRight",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Move right",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "58": {
+          "type": "button",
+          "name": "wocHudUp",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Move up",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "59": {
+          "type": "button",
+          "name": "wocHudDown",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Move down",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "60": {
+          "type": "button",
+          "name": "wocHudCentre",
+          "properties": {
+            "Visible": {
+              "value": 1,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 3,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "Centre",
+                "type": "Text"
+              }
+            }
+          ]
+        },
         "90": {
           "type": "label",
           "name": "wocHeadCarPlay",
@@ -61,7 +415,7 @@
           "rows": [
             {
               "Text": {
-                "value": "Status: Connecting\u2026",
+                "value": "Status: Connecting…",
                 "type": "Text"
               }
             }
@@ -111,6 +465,50 @@
             }
           ]
         },
+        "29": {
+          "type": "label",
+          "name": "wocWifi",
+          "properties": {
+            "Visible": {
+              "value": 0,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "",
+                "type": "Text"
+              }
+            }
+          ]
+        },
+        "30": {
+          "type": "label",
+          "name": "wocWifiHint",
+          "properties": {
+            "Visible": {
+              "value": 0,
+              "type": "UInt"
+            },
+            "Focusable": {
+              "value": 0,
+              "type": "UInt"
+            }
+          },
+          "rows": [
+            {
+              "Text": {
+                "value": "",
+                "type": "Text"
+              }
+            }
+          ]
+        },
         "91": {
           "type": "label",
           "name": "wocHeadAa",
@@ -149,7 +547,7 @@
           "rows": [
             {
               "Text": {
-                "value": "Status: Connecting\u2026",
+                "value": "Status: Connecting…",
                 "type": "Text"
               }
             }
@@ -215,7 +613,7 @@
           "rows": [
             {
               "Text": {
-                "value": "Zoom: \u2014",
+                "value": "Zoom: —",
                 "type": "Text"
               }
             }
@@ -291,76 +689,6 @@
             }
           ]
         },
-        "92": {
-          "type": "label",
-          "name": "wocHeadGeneral",
-          "properties": {
-            "Visible": {
-              "value": 1,
-              "type": "UInt"
-            },
-            "Focusable": {
-              "value": 0,
-              "type": "UInt"
-            }
-          },
-          "rows": [
-            {
-              "Text": {
-                "value": "General",
-                "type": "Text"
-              }
-            }
-          ]
-        },
-        "35": {
-          "type": "checkBox",
-          "name": "wocGuide",
-          "properties": {
-            "Visible": {
-              "value": 1,
-              "type": "UInt"
-            },
-            "Focusable": {
-              "value": 3,
-              "type": "UInt"
-            }
-          },
-          "rows": [
-            {
-              "Text": {
-                "value": "Hide BMW's turn box",
-                "type": "Text"
-              },
-              "eParam_RowSelected": {
-                "value": false,
-                "type": "Bool"
-              }
-            }
-          ]
-        },
-        "39": {
-          "type": "button",
-          "name": "wocLogs",
-          "properties": {
-            "Visible": {
-              "value": 1,
-              "type": "UInt"
-            },
-            "Focusable": {
-              "value": 3,
-              "type": "UInt"
-            }
-          },
-          "rows": [
-            {
-              "Text": {
-                "value": "Logs",
-                "type": "Text"
-              }
-            }
-          ]
-        },
         "34": {
           "type": "button",
           "name": "wocRestart",
@@ -378,28 +706,6 @@
             {
               "Text": {
                 "value": "Restart head unit",
-                "type": "Text"
-              }
-            }
-          ]
-        },
-        "21": {
-          "type": "label",
-          "name": "wocMap",
-          "properties": {
-            "Visible": {
-              "value": 1,
-              "type": "UInt"
-            },
-            "Focusable": {
-              "value": 0,
-              "type": "UInt"
-            }
-          },
-          "rows": [
-            {
-              "Text": {
-                "value": "Cluster map: Off",
                 "type": "Text"
               }
             }
@@ -539,7 +845,7 @@
           "rows": [
             {
               "Text": {
-                "value": "Saved logs: Connecting\u2026",
+                "value": "Saved logs: Connecting…",
                 "type": "Text"
               }
             }
@@ -578,7 +884,7 @@
           "rows": [
             {
               "Text": {
-                "value": "Address: \u2014",
+                "value": "Address: —",
                 "type": "Text"
               }
             }

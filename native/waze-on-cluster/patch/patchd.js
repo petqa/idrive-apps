@@ -14,7 +14,9 @@
  * tool's carplay.service drop-in (restartCarplay), else at the next head-unit
  * start. It applies no patch on its own. Explicit
  * capture commands go to a separately supervised DLT helper; reading logs does
- * not change tracing mode.
+ * not change tracing mode. It also reads which Wi-Fi band wireless CarPlay
+ * runs on (wifi_band.js), from wpa_supplicant's D-Bus, which only root may
+ * use, and reports it in its status.
  *
  * Protocol (newline-delimited JSON, one object per line):
  *   app -> patchd  {"cmd":"status"}
@@ -38,6 +40,22 @@
  *                                   reboot-reply carries ok/reason.
  *                  {"cmd":"logs"}   carplay + marker + avb log lines, dlt-receive health, patchd log
  *                                   (to the asker, read-only)
+ *                  {"cmd":"cluster","on":0|1}
+ *                  {"cmd":"hud","on":0|1}
+ *                  {"cmd":"hud-size","hud_width_pct":0|20..100}   (over 85 saved as 85)
+ *                  {"cmd":"hud-pos","hud_x":-800..800,"hud_y":-800..800}
+ *                                   the map on the cluster on or off, on the HUD on
+ *                                   or off, the HUD's size
+ *                                   (0: the default box) and where it is moved from
+ *                                   the centre (HUD pixels), saved for the render's
+ *                                   next start as "cluster", "hud", "hud_width_pct",
+ *                                   "hud_offset_x" and "hud_offset_y" in MAP_STATE
+ *                                   (the app changes the running render itself).
+ *                                   Changes are written together MAP_SAVE_MS
+ *                                   after the last one; the reply (cluster-reply,
+ *                                   hud-reply, hud-size-reply, hud-pos-reply)
+ *                                   follows the write and carries ok, the values
+ *                                   saved and reason.
  *                  {"cmd":"capture-start"|"capture-stop"|"capture-status"}
  *                                   (capture-reply to the asker; every client gets
  *                                   ev capture, also once a second)
@@ -65,6 +83,9 @@
  *                    (while the restart limit holds: when one is taken again)}
  *                    recovered: n, while the original boot recovery restored
  *                    after n failed head-unit starts is on disk (also in aa)
+ *                    wifi: {band: "5" | "2.4", iface, freq (MHz)} while
+ *                    CarPlay runs over Wi-Fi and its band is known, else
+ *                    null (wifi_band.js); a status goes out when it changes
  *                    conflict: why the patch is not applied when the tool is
  *                    installed (a head unit that refuses our parts: "not
  *                    supported on this car (head unit: ...)"; a binary the
@@ -110,6 +131,7 @@ var lock = require('./remount_lock.js');
 var bootIds = require('./boot_id.js');
 var headUnit = require('./head_unit.js');
 var record = require('./patch_record.js');
+var wifiBand = require('./wifi_band.js');
 
 var HERE = __dirname;
 var PATCHER = path.join(HERE, 'carplay_patch.js');
@@ -118,6 +140,7 @@ var FIFO = process.env.WOC_FIFO || '/run/waze-on-cluster/alt.h264';
 /* The local UDP sink for udp mode. Must match the render's udp_port
  * (waze-on-cluster.conf); the render listens on 127.0.0.1:UDP_PORT. */
 var UDP_PORT = process.env.WOC_UDP_PORT || '20557';
+var HUD_MAX_PCT = 85;   /* the widest HUD map size: wider is cut off at the HUD's edges */
 var SOCK = process.env.WOC_PATCH_SOCK || '/dev/shm/waze-on-cluster/patch.sock';
 var SOCK_GROUP = process.env.WOC_PATCH_GROUP || 'tm_oap_app';
 var MOUNT = process.env.WOC_MOUNT || '/bin/mount';
@@ -185,6 +208,99 @@ var REBOOT_CMD = (process.env.WOC_REBOOT_CMD || '/usr/bin/nsm_control --requestR
 var REBOOT_CMD_TIMEOUT_MS = 30000;
 /* A restart NSM took that has not taken the unit down by then failed. */
 var REBOOT_WAIT_MS = parseInt(process.env.WOC_REBOOT_WAIT_MS, 10) || 180000;
+/* The unit's own render settings, which updates keep. */
+var LOCAL_CONF = process.env.WOC_LOCAL_CONF || '/var/opt/waze-on-cluster/waze-on-cluster.local.conf';
+/* Where the map shows and the HUD map's size and place, as the app chose
+ * them: the render reads this file (its map_state_file) over its
+ * configuration. Not in LOCAL_CONF, which waze-on-cluster 0.8 refuses to
+ * start with any of MAP_KEYS in. */
+var MAP_STATE = path.join(STATE_DIR, 'map.state.conf');
+var MAP_KEYS = ['cluster', 'hud', 'hud_width_pct', 'hud_offset_x', 'hud_offset_y'];
+
+/* A key = value file's settings; none when it cannot be read. */
+function readConf(file) {
+    var conf = {};
+    try {
+        fs.readFileSync(file, 'utf8').split('\n').forEach(function (l) {
+            var m = /^\s*(\w+)\s*=\s*(.*?)\s*$/.exec(l);
+            if (m) conf[m[1]] = m[2];
+        });
+    } catch (e) {}
+    return conf;
+}
+
+/* Rewrites a key = value file: each key of set replaced or added, each key
+ * of drop removed, the other lines kept as they are. Atomic (saveFile). */
+function rewriteConf(file, set, drop) {
+    var lines = [];
+    try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    var keys = Object.keys(set).concat(drop);
+    lines = lines.filter(function (l) { return !keys.some(function (k) { return new RegExp('^\\s*' + k + '\\s*=').test(l); }); });
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    Object.keys(set).forEach(function (k) { lines.push(k + ' = ' + set[k]); });
+    saveFile(file, lines.length ? lines.join('\n') + '\n' : '');
+}
+
+/* A map setting's value as a file holds it: a whole number in the key's
+ * range (the commands' below). */
+function mapValueOk(k, v) {
+    var n = Number(v);
+    return /^-?\d+$/.test(v) && (k === 'hud_width_pct' ? n === 0 || (n >= 20 && n <= 100)
+        : /^hud_offset_/.test(k) ? n >= -800 && n <= 800 : n === 0 || n === 1);
+}
+
+/* Moves any of MAP_KEYS found in LOCAL_CONF into MAP_STATE, a value already
+ * there kept and one out of range dropped, then removes them from
+ * LOCAL_CONF, its other lines kept: waze-on-cluster 0.8 refuses to start
+ * with a key it does not know in LOCAL_CONF, and "Undo update" goes back to
+ * it. */
+function moveMapSettings() {
+    var local = readConf(LOCAL_CONF), state = readConf(MAP_STATE), move = {};
+    var found = MAP_KEYS.filter(function (k) { return k in local; });
+    if (!found.length) return;
+    found.forEach(function (k) { if (!(k in state) && mapValueOk(k, local[k])) move[k] = local[k]; });
+    try {
+        if (Object.keys(move).length) rewriteConf(MAP_STATE, move, []);
+        rewriteConf(LOCAL_CONF, {}, MAP_KEYS);
+        log('map settings moved from ' + LOCAL_CONF + ' to ' + MAP_STATE + ': ' + found.map(function (k) {
+            return k + (k in move ? ' ' + move[k] : ' dropped');
+        }).join(', '));
+    } catch (e) { log('moving the map settings out of ' + LOCAL_CONF + ' failed: ' + e.message); }
+}
+
+/* A HUD offset: a whole number in -800..800. */
+function isOffset(v) {
+    return typeof v === 'number' && v === Math.floor(v) && v >= -800 && v <= 800;
+}
+/* The map's settings wait MAP_SAVE_MS after the last change and go to
+ * MAP_STATE in one write (a press of Move or a turn of the slider each
+ * sends one, and each write syncs the flash); quit() writes what waits.
+ * Each request's reply follows the write: ok, or why it failed, and the
+ * values saved for its keys. */
+var MAP_SAVE_MS = parseInt(process.env.WOC_MAP_SAVE_MS, 10) || 500;
+var mapSave = null;   /* { settings, asked: [{ sock, ev, keys, what }], timer } */
+function saveMapSettings(sock, ev, settings, what) {
+    if (!mapSave) mapSave = { settings: {}, asked: [], timer: null };
+    Object.keys(settings).forEach(function (k) { mapSave.settings[k] = settings[k]; });
+    mapSave.asked.push({ sock: sock, ev: ev, keys: Object.keys(settings), what: what });
+    clearTimeout(mapSave.timer);
+    mapSave.timer = setTimeout(flushMapSettings, MAP_SAVE_MS);
+}
+function flushMapSettings() {
+    var m = mapSave, err = null;
+    if (!m) return;
+    mapSave = null;
+    clearTimeout(m.timer);
+    try { rewriteConf(MAP_STATE, m.settings, []); } catch (e) { err = e; }
+    var whats = m.asked.map(function (a) { return a.what; }).filter(function (w, i, all) { return all.indexOf(w) === i; }).join(', ');
+    if (err) log('saving ' + whats + ' failed: ' + err.message);
+    else log(whats + ': ' + Object.keys(m.settings).map(function (k) { return k + ' ' + m.settings[k]; }).join(', ') + ' (saved for the next start)');
+    m.asked.forEach(function (a) {
+        var r = { ev: a.ev, ok: !err, reason: err ? err.message : undefined };
+        a.keys.forEach(function (k) { r[k] = m.settings[k]; });
+        reply(a.sock, r);
+    });
+}
 var statusInFlight = false;  /* coalesce the carplay_patch status spawns */
 var MAX_LINE = 64 * 1024;    /* drop a client that floods without a newline */
 
@@ -561,6 +677,7 @@ function status(extra, aaExtra) {
             if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
             msg.aa = aaMsg(aa);
             if (aaExtra) Object.keys(aaExtra).forEach(function (k) { msg.aa[k] = aaExtra[k]; });
+            msg.wifi = wifi ? wifi.current() : null;
             send(msg);
         });
     });
@@ -912,10 +1029,13 @@ function dltRetryNow() {
 function quit() {
     if (quitting) return;
     quitting = true;
+    flushMapSettings();
     quitWhenIdle();
 }
 function quitWhenIdle() {
-    if (quitting && !busy) process.exit(0);
+    if (!quitting || busy) return;
+    flushMapSettings();
+    process.exit(0);
 }
 
 /* Restore / to read-only, and never leave it writable: if the remount keeps
@@ -1116,7 +1236,9 @@ function aaRevert(noRestart, dropBackup, done) {
 function saveFile(f, text) {
     try { fs.mkdirSync(STATE_DIR, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
     var fd = fs.openSync(f + '.tmp', 'w', 0o644);
-    try { fs.writeSync(fd, text); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    /* The capture (hmi_5000) reads waze-on-cluster.local.conf and the map
+     * settings, whatever umask the caller (an install hook) has. */
+    try { fs.fchmodSync(fd, 0o644); fs.writeSync(fd, text); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(f + '.tmp', f);
 }
 
@@ -1246,6 +1368,32 @@ function handle(line, sock) {
             reply(sock, { ev: 'capture-reply', capture: state });
             send({ ev: 'capture', capture: state });
         });
+        return;
+    }
+    /* Where the map shows and the HUD's size and place: not operations on
+     * carplay, so not held back by one. */
+    if (msg.cmd === 'cluster' || msg.cmd === 'hud') {
+        var set = {};
+        if (msg.on !== 0 && msg.on !== 1) { reply(sock, { ev: msg.cmd + '-reply', ok: false, reason: 'on must be 0 or 1' }); return; }
+        set[msg.cmd] = msg.on;
+        saveMapSettings(sock, msg.cmd + '-reply', set, 'where the map shows');
+        return;
+    }
+    if (msg.cmd === 'hud-size') {
+        var pct = msg.hud_width_pct;
+        if (!(pct === 0 || (typeof pct === 'number' && pct >= 20 && pct <= 100 && pct === Math.floor(pct)))) {
+            reply(sock, { ev: 'hud-size-reply', ok: false, reason: 'HUD width must be 0 or 20-100 %' });
+            return;
+        }
+        saveMapSettings(sock, 'hud-size-reply', { hud_width_pct: Math.min(pct, HUD_MAX_PCT) }, 'the HUD map size');
+        return;
+    }
+    if (msg.cmd === 'hud-pos') {
+        if (!isOffset(msg.hud_x) || !isOffset(msg.hud_y)) {
+            reply(sock, { ev: 'hud-pos-reply', ok: false, reason: 'HUD offsets must be whole numbers from -800 to 800' });
+            return;
+        }
+        saveMapSettings(sock, 'hud-pos-reply', { hud_offset_x: msg.hud_x, hud_offset_y: msg.hud_y }, 'the HUD map position');
         return;
     }
     if (msg.cmd === 'reboot') { rebootCmd(sock); return; }
@@ -1507,6 +1655,7 @@ function oneShot(which) {
         });
     }
     if (which === 'deactivate') markBy = 'removal';
+    else moveMapSettings();
     highfInstall = which === 'activate' && headUnit.variant() === 'HIGHF';
     try { ensureDir(path.dirname(SOCK)); } catch (e) { result.status = e.message; finish(1); return; }
     lock.acquire(20000, function (got) {
@@ -1540,9 +1689,12 @@ function oneShot(which) {
     });
 }
 
+var wifi = null;   /* the Wi-Fi band sampler (wifi_band.js), in the daemon only */
+
 function main() {
     var dir = path.dirname(SOCK);
     ensureDir(dir);
+    moveMapSettings();
     try { if (fs.lstatSync(SOCK)) fs.unlinkSync(SOCK); } catch (e) {}
 
     var server = net.createServer(accept);
@@ -1558,6 +1710,7 @@ function main() {
         followCarplayJournal();
         followAvbJournal();
         followDlt();
+        wifi = wifiBand.start(log, function () { status(); }, dir);
         /* The capture's state each second, to the clients, and while a
          * capture opens or is open to dltRetryNow; with neither, the state
          * goes nowhere and is not asked for. Only a capture-start through

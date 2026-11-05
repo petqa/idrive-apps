@@ -39,7 +39,7 @@ a video pipeline:
 Install the app `robertn_waze_cluster` from the catalog of
 [idrive-apps](https://github.com/robertnisipeanu/idrive-apps)
 through the [mgu Store](https://github.com/robertnisipeanu/mgu-store). The
-app requires this tool (0.8.6); this tool requires `cluster-render` 0.3.11 and
+app requires this tool (0.9.0); this tool requires `cluster-render` 0.4.0 and
 `mgu-deploy` 0.7.11, the deploy tool version that runs activate and deactivate
 hooks and puts the tool's `recmgr` and `crashNames` names, `aapd` among
 them, on the lists. Requirements resolve across catalog sources.
@@ -309,8 +309,82 @@ the render decodes through a lost packet:
   since 12:40:50`) and in `probe.txt`. A status line whose only change is
   the stream's reason is logged at most once every 10 s.
 
-From a shell, `waze-on-cluster -c <conf> run map|panel|hud` (`sail` is an
-alias of `map`) sets the target until the service restarts and prints the
+**Where the map shows** (the HUD contributed by
+[eroobeeroo](https://github.com/eroobeeroo), the choice of both or one after
+[wesleyredhat](https://github.com/wesleyredhat)'s #53). `cluster` (on by
+default) and `hud` (off by default) choose (`src/map_feeds.*`); the app's
+**Show on** sets them to the cluster, the HUD or both, and each change takes
+effect at once:
+
+| | |
+|---|---|
+| Cluster only (the default) | the map on the cluster as always |
+| HUD only | no map scene on the cluster, so the KOMBI shows its own content and the guide hold is not asked for; the HUD takes each frame itself, with the whole upload budget, at most `hud_fps` a second |
+| Both | the cluster first; the HUD gets a copy, and up to half the budget, only what it spends (cluster-render README.md "Upload budget") |
+| Neither (the configuration's alone; the app does not offer it) | no feed and no connection to the renderer; every frame is still decoded, since the phone sends keyframes only when its stream starts, but none gets a picture: no VPP, readback, rounding, copy or hand-off. Turned on again, the map shows with the next frame, without waiting for a keyframe |
+
+cluster-render's `hud` target is slot 0x323 (its README.md "The HUD").
+
+- **Off costs nothing.** With the HUD off there is no HUD connection to the
+  renderer, no layer, no worker thread and no copy, so nothing HUD-related
+  is asked of the KOMBI. On a head unit that refuses the tool, nothing of
+  either runs.
+- **The cluster first.** A new picture goes to the cluster's feed without a
+  copy. The HUD's feed gets a copy of the newest when its next frame is
+  due, at most `hud_fps` (10) a second, and a worker thread at a lower
+  priority scales it to the size it is shown at (`src/atlas_scale.*`, area
+  averaging, `hud_scale_down`); the main loop only copies and hands over,
+  so the cluster's frames never wait for the HUD's. A picture the same as
+  the last (a still map) goes to both as a repeat: the cluster's last frame
+  and the HUD's last scaled one again, a few bytes each, with no copy and
+  no scaling, and both layers stay shown. The copy goes no further than
+  the cluster's map: one decode, one capture. cluster-render writes the
+  HUD's frames, in changed tiles and never packed (a frame goes while the
+  budget has any allowance left, into debt, and waits while it is in debt),
+  from the HUD's share: up to half the
+  budget, what it does not spend going back to the cluster at once.
+- **Size** (`hud_width_pct`): Standard (0, the fitted box, about 57 % of the
+  HUD's width, 453x200), or 30 % to 85 % (680x300, the widest: wider is cut
+  off at the HUD's edges, and a larger saved size is held to it), the
+  picture's shape kept; the app's **Size** slider steps it by 5 %.
+  A new size is a new layer at that size.
+- **Position** (`hud_offset_x`, `hud_offset_y`): pixels of the HUD's scene
+  moved from the centre (+x right, +y down), held so the map stays whole
+  inside the HUD (the status then reports the offset as far as it goes); the
+  app's **Move left**, **Move right**, **Move up** and **Move down** move it
+  10 px a press and **Centre** puts it back. A move only changes the layer's
+  place, so it shows at once.
+- **Made for a HUD.** At the standard size a frame is 135,600 B instead of
+  783,360. On a HUD dark pixels are see-through: the corners are rounded
+  (`hud_round_corners`, a twelfth of its height) and fade to black, and a
+  night map's background is made black (`hud_black_background`): the
+  frame's most common shade, followed frame to frame, and the shades just
+  above it, so the HUD shows the roads, route and labels without Waze's
+  grey-blue field; a day map (light background) is left as it is. Green is
+  never made black, and does not count towards the background.
+- **It gives way.** The HUD map steps aside while the HUD's media and list
+  pop-ups show (cluster-render `hud_yield_slots`), and never takes the HUD
+  from BMW's own content.
+- **Disabled after errors.** cluster-render's mapping guard turns the HUD
+  off after two cluster restarts within 10 s of its mapping; the status
+  says `hud_state` `disabled`, the app shows `HUD map: Disabled after
+  errors`, and its frames are no longer copied or scaled. The cluster's map
+  is not affected. Choosing Cluster and then the HUD again does not undo it; as
+  root, `cluster-render guard-reset` does.
+- Not with `target = panel`, which shares the HUD's scene id.
+- The settings (`cluster`, `hud`, `hud_width_pct`, `hud_offset_x`,
+  `hud_offset_y`) are saved by `patchd` in
+  `/var/opt/waze-on-cluster/map.state.conf` (`map_state_file`), which this
+  tool reads over its configuration at each start, and the app changes the
+  running render at once. They stay out of `waze-on-cluster.local.conf`,
+  which waze-on-cluster 0.8 refuses to start with: `patchd` moves any it
+  finds there into the state file at its start and at an install. Control:
+  `{"cmd":"hud","on":"1"}`, `{"cmd":"hud","hud_width_pct":"70"}`,
+  `{"cmd":"hud","hud_x":"40","hud_y":"-20"}` (strings; an axis left out
+  stays).
+
+From a shell, `waze-on-cluster -c <conf> run map|panel` (`sail` is an alias
+of `map`) sets the cluster target until the service restarts and prints the
 status.
 
 ## Status and diagnostics
@@ -355,7 +429,32 @@ files in `/run/cluster-render/`, the render's `status.json` and
 journal of the render, `patchd`, the boot step, the recovery, capture,
 journal and logs services, cluster-render and carplay, the list of boots,
 `ls -l` of both tools' folders, their `*.local.conf`, the date and the
-uptime.
+uptime, and `wifi.txt`: CarPlay's Wi-Fi band (below), each P2P interface's
+`/proc/net/dev` counters and the kernel's last 60 802.1X and DHCP lines for
+the P2P interfaces (from the journal, else `dmesg`).
+
+**CarPlay's Wi-Fi band.** The head unit runs two wireless-CarPlay P2P
+groups, one on 5 GHz and one on 2.4 GHz, bridged on `wlan_bridge`
+(`p2p-wlan0-N` with Broadcom's driver, `p2p-wfd0-N` with NXP's; which name
+is which band is not fixed). On 2.4 GHz, CarPlay's streams and the cluster
+stream together can be more than the link carries, and audio cuts out.
+`patchd` (`patch/wifi_band.js`) reads `/proc/net/tcp` and `tcp6` every 15
+s. While carplay holds a connection to the phone, it compares each P2P
+interface's received bytes in `/proc/net/dev` over 5 s at the start, then
+every 2 minutes: the phone's is the one receiving at least 1 KiB/s and 4
+times any other. Its band is the frequency of that interface's group, which
+`patchd` reads from wpa_supplicant over D-Bus with `busctl` (root only, by
+the bus policy; never starting wpa_supplicant): the interface's `P2PDevice`
+`Group`, then the group's `Frequency`. CarPlay over USB, too little traffic
+to tell, or a frequency that cannot be read or is in no band leave the band
+unknown; it is never taken from the interface's name or order. A band once
+known stays for that CarPlay session through a still screen, while its
+interface still receives the most, at least 128 bytes/s. `patchd` logs the
+band when it is first known and when it changes (`CarPlay Wi-Fi: 2.4 GHz
+(p2p-wlan0-1, 2462 MHz, 1180 KB/s)`), unknown after a band, and a frequency
+it could not read; it sends it to the app in its status (`wifi`) and writes
+it, with each P2P interface's rates, to
+`/dev/shm/waze-on-cluster/wifi-band.json` (0644).
 
 Sockets: `/dev/shm/waze-on-cluster/ctl.sock` (the render's status and log,
 and the turn-box switch, group `tm_oap_app`; a connection also starts the
@@ -483,7 +582,8 @@ the link to the cluster, so an upload that outruns it can drop other contents
 too. Details: the cluster-render README.
 
 Settings are in `waze-on-cluster.conf` (documented inline). Overrides go in
-`/var/opt/waze-on-cluster/waze-on-cluster.local.conf`, which updates keep.
+`/var/opt/waze-on-cluster/waze-on-cluster.local.conf`, which updates keep;
+the app's map settings in `/var/opt/waze-on-cluster/map.state.conf`.
 
 ## The patch
 

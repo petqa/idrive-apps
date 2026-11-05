@@ -5,7 +5,8 @@
  * task, an Android Auto one is waited for and cropped, and a session that
  * goes from one to the other and back sets VPP up for each. Its pictures: a
  * picture equal to the one before comes out as the same, unpacked, and the
- * others packed with their levels rounded. GPU copy: asked for with
+ * others packed with their levels rounded; after forget_last, the same
+ * picture once more packed. GPU copy: asked for with
  * MFXInitEx on page-aligned surfaces. A session that cannot be made or set
  * up with it is made again without, the sequence starting over as it began
  * (a rect restart's exemption kept), and no session in the process asks
@@ -197,6 +198,12 @@ int main()
         expect(r.whole, "each atlas packed whole");
         expect(count("vpp-sync") == 9, "VPP on every frame with a picture");
         expect(r.dec.pack_us().n == 9, "each compared or packed");
+        /* forgotten, the same picture again comes with its atlas, once */
+        r.dec.forget_last();
+        r.feed(nullptr, false, 5);
+        r.feed(nullptr, false, 5);
+        expect(r.frames.size() == 12 && r.frames[10] == 4 && r.frames[11] == 0,
+               "after forget_last the last picture again is packed, then the same");
     }
     {
         Run r("", 0, true);

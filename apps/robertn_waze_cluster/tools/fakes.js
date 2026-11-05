@@ -120,6 +120,10 @@ class FakeRender extends LineServer {
         this.reason = null;
         this.hide = 1;
         this.guideDisabled = 0;
+        /* the HUD: off by default; its state while on (hudState null: as the map) */
+        this.hud = 0;
+        this.cluster = 1;
+        this.hudState = null;
         this._showTimer = null;
     }
 
@@ -140,6 +144,11 @@ class FakeRender extends LineServer {
 
     _status() {
         const s = { ev: 'status', state: this.state, target: this.target, page: this.page, reason: this.reason };
+        /* hud null: a tool without the HUD's fields (one refused by its head unit) */
+        if (this.hud !== null) {
+            Object.assign(s, { cluster: this.cluster, hud: this.hud, hud_state: this.hud ? this.hudState || this.state : 'off',
+                hud_width_pct: this.hudWidth || 0, hud_x: this.hudX || 0, hud_y: this.hudY || 0 });
+        }
         if (this.hide !== null) {
             s.hide_bmw_guidance = this.hide;
             s.guide_disabled = this.guideDisabled;
@@ -172,6 +181,19 @@ class FakeRender extends LineServer {
             this.hide = msg.hide;
             this._broadcast(this._status());
         }
+        if (msg.cmd === 'cluster' && msg.on !== undefined) {
+            this.cluster = Number(msg.on);
+            this._broadcast(this._status());
+        }
+        if (msg.cmd === 'hud') {
+            if (msg.on !== undefined) this.hud = Number(msg.on);
+            if (msg.hud_width_pct !== undefined) this.hudWidth = Number(msg.hud_width_pct);
+            /* held inside the HUD, as the render does, when hudMaxX is set */
+            const lim = (v) => (this.hudMaxX ? Math.max(-this.hudMaxX, Math.min(this.hudMaxX, v)) : v);
+            if (msg.hud_x !== undefined) this.hudX = lim(Number(msg.hud_x));
+            if (msg.hud_y !== undefined) this.hudY = Number(msg.hud_y);
+            this._broadcast(this._status());
+        }
     }
 }
 
@@ -191,6 +213,7 @@ class FakePatch extends LineServer {
         this.aa = { state: 'original', density: 180, densities: [150, 400, 10] };   /* Android Auto's patch */
         this.reboots = 0;     /* reboot commands honoured */
         this.restart = { state: 'idle' };
+        this.wifi = null;          /* CarPlay's Wi-Fi band: { band: '5' | '2.4', iface, freq } or null */
         this.rebootFails = null;   /* 'refused' | 'stayed' | 'error': the restart fails so */
         this.mute = false;         /* commands received and not answered */
         this.holdAa = false;       /* an Android Auto change stays busy until releaseAa(failure) */
@@ -212,7 +235,13 @@ class FakePatch extends LineServer {
             res: this.res, safe: this.safe, carplay: this.carplay, reason: this.reason,
             pending: this.pending, conflict: this.conflict, recovered: this.recovered, aa: this.aa,
             busy: this.busy ? 'carplay' : this.aa.state === 'busy' ? 'aa' : this._rebooting ? 'restart' : null,
-            restart: this.restart };
+            restart: this.restart, wifi: this.wifi };
+    }
+
+    /* CarPlay's Wi-Fi band changes, as patchd sends it: a status. */
+    setWifi(wifi) {
+        this.wifi = wifi;
+        this._broadcast(this._status());
     }
 
     _onConnect(socket) {

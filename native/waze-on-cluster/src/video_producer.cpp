@@ -294,8 +294,11 @@ bool VideoProducer::start_decoder(std::string *err)
 void VideoProducer::decode(const uint8_t *data, size_t len, bool end_of_au)
 {
     std::string derr;
-    const bool ok = decoder_.feed(data, len, [this](const VideoFrame &f) { on_frame(f); }, &derr, end_of_au,
-                                  !(packet_ && packet_->later_frame));
+    catching_up_ = packet_ && packet_->later_frame;
+    const bool picture = !catching_up_ && pictures_.load();
+    if (picture && resumed_.load())
+        decoder_.forget_last();   /* the feeds made since have not had it */
+    const bool ok = decoder_.feed(data, len, [this](const VideoFrame &f) { on_frame(f); }, &derr, end_of_au, picture);
     const bool decoding = decoder_.decoding();
     if (ok && decoding == decoding_)
         return;
@@ -321,7 +324,8 @@ void VideoProducer::on_frame(const VideoFrame &f)
         const std::string line = health_.frame(cld::now_ms(), f.corrupted, gaps_.after_loss());
         if (!line.empty())
             log_info("%s", line.c_str());
-        backlog_.skipped();
+        if (catching_up_)
+            backlog_.skipped();
         if (f.w == cfg_.tex_width && f.h == cfg_.tex_height)
             last_frame_ms_ = now_us() / 1000;
         decoded_total_++;
@@ -330,7 +334,8 @@ void VideoProducer::on_frame(const VideoFrame &f)
     /* the atlas starts with the luma plane; the same picture again has not
      * changed and is as blank as it was */
     const bool sized = f.w == cfg_.tex_width && f.h == cfg_.tex_height;
-    const bool changed = sized && f.atlas && change_.changed(f.atlas->data());
+    const bool sampled = sized && f.atlas && change_.changed(f.atlas->data());
+    const bool changed = sized && f.atlas && (resumed_.exchange(false) || sampled);
     std::lock_guard<std::mutex> lock(frame_mutex_);
     const std::string line = health_.frame(cld::now_ms(), f.corrupted, gaps_.after_loss());
     if (!line.empty())
@@ -375,6 +380,16 @@ bool VideoProducer::take(std::vector<uint8_t> *frame, uint64_t *id, bool *same)
     while (ready_[0] >= 0 && read(ready_[0], drain, sizeof drain) > 0) {
     }
     return true;
+}
+
+void VideoProducer::set_pictures(bool on)
+{
+    if (on && !pictures_.exchange(true)) {
+        resumed_ = true;
+        log_info("waze: the map shown again: pictures from the next frame");
+    } else if (!on && pictures_.exchange(false)) {
+        log_info("waze: the map shown nowhere: frames decoded without a picture");
+    }
 }
 
 void VideoProducer::set_live(bool on, int64_t now_ms)

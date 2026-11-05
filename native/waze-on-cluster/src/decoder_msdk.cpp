@@ -794,6 +794,12 @@ void Decoder::flush(const FrameSink &cb)
     s.error.clear();
 }
 
+void Decoder::forget_last()
+{
+    if (s_)
+        s_->have_last = false;
+}
+
 void Decoder::shutdown() { s_.reset(); }
 
 bool Decoder::decoding() const { return s_ && s_->running; }

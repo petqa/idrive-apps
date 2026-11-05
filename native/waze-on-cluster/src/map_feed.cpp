@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Robert Nisipeanu
 #include "map_feed.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -31,7 +32,8 @@ bool target_size(const std::string &targets, const std::string &name, uint32_t *
 
 }  // namespace
 
-MapFeed::MapFeed(const FeedConfig &cfg) : cfg_(cfg), client_("waze-on-cluster", cfg.socket)
+MapFeed::MapFeed(const FeedConfig &cfg)
+    : cfg_(cfg), client_("waze-on-cluster", cfg.socket), placed_x_(cfg.hud_offset_x), placed_y_(cfg.hud_offset_y)
 {
     client_.on_ready = [this] {
         connected_ = true;
@@ -85,12 +87,37 @@ void MapFeed::make_layer()
     }
     /* The map area: all of the map slot's scene, the centred 1088x480 of a
      * whole-panel one, a fitted centre on the HUD. */
-    crk::QuadRect q = crk::map_quad(tw, th, cfg_.video.w, cfg_.video.h);
+    crk::QuadRect q = quad(tw, th);
     if (cfg_.rect.set() && cfg_.rect.fits(tw, th))
         q = crk::QuadRect{cfg_.rect.x, cfg_.rect.y, cfg_.rect.w, cfg_.rect.h};
     else if (cfg_.rect.set())
         log_warn("render: map_rect %u,%u,%u,%u is outside %s (%ux%u); the map area instead", cfg_.rect.x,
                  cfg_.rect.y, cfg_.rect.w, cfg_.rect.h, cfg_.target.c_str(), tw, th);
+    /* The HUD, shown smaller than the decoded frame: the frame is scaled to
+     * the size it is shown at (a multiple of 4 wide and high, as the
+     * renderer and packed motion need), drawn 1:1 centred where the quad
+     * was. On the cluster the KOMBI scales a map_rect itself. */
+    cr::VideoOptions vo = cfg_.video;
+    scaling_ = false;
+    const uint32_t sw = q.w & ~3u, sh = q.h & ~3u;
+    if (cfg_.target == "hud" && cfg_.scale_down && (sw < cfg_.video.w || sh < cfg_.video.h) && sw >= 64 && sh >= 32 &&
+        sw <= cfg_.video.w && sh <= cfg_.video.h) {
+        q.x += (q.w - sw) / 2;
+        q.y += (q.h - sh) / 2;
+        q.w = sw;
+        q.h = sh;
+        vo.w = sw;
+        vo.h = sh;
+        scaling_ = true;
+        shape_ = ScaleShape();
+        shape_.w = cfg_.video.w;
+        shape_.h = cfg_.video.h;
+        shape_.dw = sw;
+        shape_.dh = sh;
+        shape_.level_bits = cfg_.scaled_level_bits;
+        shape_.radius = cfg_.hud_round_corners ? (sh / 12 > 6 ? sh / 12 : 6) : 0;
+        shape_.black = cfg_.hud_black_background;
+    }
     lo_ = cr::LayerOptions();
     lo_.target = cfg_.target;
     lo_.klass = "content";
@@ -107,8 +134,72 @@ void MapFeed::make_layer()
     layer_reason_.clear();
     target_state_.clear();
     holder_.clear();
-    layer_ = client_.video(lo_, cfg_.video);
-    log_info("render: map layer on %s (%ux%u), quad %ux%u at %u,%u", cfg_.target.c_str(), tw, th, q.w, q.h, q.x, q.y);
+    layer_ = client_.video(lo_, vo);
+    log_info("render: map layer on %s (%ux%u), quad %ux%u at %u,%u%s", cfg_.target.c_str(), tw, th, q.w, q.h, q.x, q.y,
+             scaling_ ? ", the frame scaled to it on the head unit" : "");
+}
+
+/* Where the map goes on a target of tw x th: the kit's fitted rect, or on
+ * the HUD with a size set, that width (the picture's shape kept, at most the
+ * HUD's height), centred; on the HUD then moved by the offset, held inside
+ * the scene. */
+crk::QuadRect MapFeed::quad(uint32_t tw, uint32_t th) const
+{
+    if (cfg_.target != "hud" || !cfg_.video.w || !cfg_.video.h)
+        return crk::map_quad(tw, th, cfg_.video.w, cfg_.video.h);
+    crk::QuadRect q;
+    const unsigned pct = cfg_.hud_width_pct;
+    if (!pct) {
+        q = crk::map_quad(tw, th, cfg_.video.w, cfg_.video.h);
+    } else {
+        uint64_t w = (uint64_t)tw * (pct > kHudMaxPct ? kHudMaxPct : pct) / 100;
+        uint64_t h = (w * cfg_.video.h + cfg_.video.w / 2) / cfg_.video.w;
+        if (h > th) {
+            h = th;
+            w = (h * cfg_.video.w + cfg_.video.h / 2) / cfg_.video.h;
+        }
+        q = crk::QuadRect{(uint32_t)((tw - w) / 2), (uint32_t)((th - h) / 2), (uint32_t)w, (uint32_t)h};
+    }
+    const long x = (long)q.x + cfg_.hud_offset_x, y = (long)q.y + cfg_.hud_offset_y;
+    const long xmax = (long)tw - (long)q.w, ymax = (long)th - (long)q.h;
+    const uint32_t cx = q.x, cy = q.y;
+    q.x = (uint32_t)(x < 0 ? 0 : x > xmax ? xmax : x);
+    q.y = (uint32_t)(y < 0 ? 0 : y > ymax ? ymax : y);
+    placed_x_ = (int)q.x - (int)cx;
+    placed_y_ = (int)q.y - (int)cy;
+    return q;
+}
+
+void MapFeed::set_hud_offset(int dx, int dy)
+{
+    if (dx == cfg_.hud_offset_x && dy == cfg_.hud_offset_y)
+        return;
+    cfg_.hud_offset_x = placed_x_ = dx;
+    cfg_.hud_offset_y = placed_y_ = dy;
+    uint32_t tw, th;
+    if (cfg_.target != "hud" || !layer_ || !target_size(client_.targets, "hud", &tw, &th))
+        return;
+    const crk::QuadRect q = quad(tw, th);
+    lo_.x = (int)q.x;
+    lo_.y = (int)q.y;
+    client_.set(layer_, lo_);
+    log_info("render: HUD map moved to %u,%u (offset %+d,%+d)", q.x, q.y, placed_x_, placed_y_);
+}
+
+void MapFeed::set_hud_width(unsigned pct)
+{
+    if (pct == cfg_.hud_width_pct)
+        return;
+    cfg_.hud_width_pct = pct;
+    uint32_t tw, th;
+    if (cfg_.target != "hud" || !layer_ || !target_size(client_.targets, "hud", &tw, &th))
+        return;
+    /* the texture's size changes with it: a new layer at the new size */
+    log_info("render: HUD map %u%% wide", pct);
+    keep_newest();
+    client_.drop(layer_);
+    layer_ = 0;
+    make_layer();
 }
 
 bool MapFeed::set_target(const std::string &name)
@@ -119,10 +210,10 @@ bool MapFeed::set_target(const std::string &name)
         return false;
     if (t == cfg_.target && layer_)
         return true;
-    if (layer_ && !held_new_)
-        held_new_ = client_.latest(layer_, &held_);
-    if (layer_)
+    if (layer_) {
+        keep_newest();
         client_.drop(layer_);
+    }
     layer_ = 0;
     cfg_.target = t;
     if (client_.connected())
@@ -142,6 +233,7 @@ void MapFeed::set_guide_hold(bool hold)
 void MapFeed::poll(int64_t now_ms)
 {
     client_.poll(now_ms);
+    send_pending(now_ms);
     if (connected_ && !client_.connected()) {
         connected_ = false;
         log_warn("render: the cluster renderer went away; reconnecting");
@@ -178,12 +270,15 @@ bool MapFeed::sending() const
 /* Counted as the frames the client would send, whether or not they go. */
 void MapFeed::offer(std::vector<uint8_t> *atlas, uint64_t id, int64_t now_ms)
 {
-    id_ = id;
     if (layer_ && client_.connected())
         frames_++;
-    held_new_ = !sending() || !client_.frame(layer_, atlas, id);
-    if (held_new_)
-        held_.swap(*atlas);
+    if (scaling_ || !sending() || !client_.frame(layer_, atlas, id)) {
+        hold(atlas, id);
+    } else {
+        id_ = id;
+        held_new_ = elsewhere_ = in_worker_ = false;
+    }
+    send_pending(now_ms);
     count_second(now_ms);
 }
 
@@ -199,15 +294,87 @@ void MapFeed::repeat(uint64_t id, int64_t now_ms)
 
 void MapFeed::send_newest()
 {
-    if (held_new_)
-        held_new_ = !client_.frame(layer_, &held_, id_);
-    else
+    if (!held_new_)
         client_.repeat(layer_, id_);
+    else if (!scaling_ && !elsewhere_)
+        held_new_ = !client_.frame(layer_, &held_, id_);
+}
+
+void MapFeed::send_pending(int64_t now_ms)
+{
+    uint64_t sid = 0;
+    if (worker_.take(&scaled_, &sid, shape_, in_worker_ ? &held_ : nullptr)) {
+        in_worker_ = false;
+        if (!scaled_.empty() && layer_)
+            client_.frame(layer_, &scaled_, sid);
+    }
+    if (!scaling_ || !held_new_ || elsewhere_ || in_worker_ || !sending() || now_ms < next_send_ms_ ||
+        !worker_.idle())
+        return;
+    if (worker_.submit(&held_, id_, shape_)) {
+        held_new_ = false;
+        in_worker_ = true;
+        next_send_ms_ = now_ms + (cfg_.video.fps ? 1000 / (int64_t)cfg_.video.fps : 0);
+    }
+}
+
+void MapFeed::hold(std::vector<uint8_t> *atlas, uint64_t id)
+{
+    id_ = id;
+    held_.swap(*atlas);
+    held_new_ = true;
+    elsewhere_ = in_worker_ = false;
+}
+
+void MapFeed::changed(uint64_t id)
+{
+    id_ = id;
+    held_new_ = elsewhere_ = true;
+    in_worker_ = false;
+}
+
+bool MapFeed::wants_picture(int64_t now_ms) const
+{
+    return elsewhere_ && held_new_ && sending() && now_ms >= next_send_ms_ && worker_.idle();
+}
+
+bool MapFeed::latest(std::vector<uint8_t> *out) const
+{
+    if (elsewhere_ || in_worker_)
+        return false;
+    if (scaling_ ? held_.empty() : !held_new_)
+        return layer_ && !scaling_ && client_.latest(layer_, out);
+    *out = held_;
+    return true;
+}
+
+bool MapFeed::disabled() const
+{
+    auto d = client_.disabled.find(cfg_.target);
+    return client_.connected() && d != client_.disabled.end() && d->second;
+}
+
+int64_t MapFeed::wake_in_ms(int64_t now_ms) const
+{
+    if (!scaling_ || !layer_)
+        return -1;
+    if (!worker_.idle())
+        return kScaleWaitMs;
+    return held_new_ && sending() && !disabled() ? std::max<int64_t>(1, next_send_ms_ - now_ms) : -1;
+}
+
+void MapFeed::keep_newest()
+{
+    if (scaling_)
+        held_new_ = true;
+    else if (!held_new_)
+        held_new_ = client_.latest(layer_, &held_);
 }
 
 void MapFeed::show_when_sent()
 {
-    if (!show_due_ || !layer_ || client_.frame_waiting(layer_))
+    if (!show_due_ || !layer_ || client_.frame_waiting(layer_) || (held_new_ && (scaling_ || elsewhere_)) ||
+        in_worker_)
         return;
     show_due_ = false;
     lo_.visible = true;
@@ -274,11 +441,15 @@ FeedStatus MapFeed::status(const std::string &decode, const std::string &stream)
 {
     FeedStatus s;
     s.target = cfg_.target;
+    s.hud_width_pct = cfg_.hud_width_pct;
+    s.hud_offset_x = placed_x_;
+    s.hud_offset_y = placed_y_;
     s.upload_cap_kb = cap_kb_;
     s.upload_reason = budget_reason_;
     s.guide_hold = cfg_.guide_hold;
     auto g = client_.guide_disabled.find(cfg_.target);
     s.guide_disabled = client_.connected() && g != client_.guide_disabled.end() && g->second;
+    s.disabled = disabled();
     char cap[96] = "";
     if (cap_kb_ && cap_kb_ < max_kb_)
         std::snprintf(cap, sizeof cap, ", upload cap %u KB/s", cap_kb_);

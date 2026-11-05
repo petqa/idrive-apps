@@ -11,6 +11,40 @@ Tools and apps for the iDrive 7 head unit (MGU) of a BMW, installed from the
 | [`release`](release) | builds and publishes the Store catalog |
 | `tools` | `oap_pack.js`, `oap_link.js`: pack the app |
 
+## The map on the HUD
+
+The app's **Show on** chooses where the map shows: the instrument cluster (**Cluster**, the default), the head-up
+display (**HUD (experimental)**) or both (**Cluster and HUD (experimental)**). With both, the HUD gets up to half the
+upload bandwidth, only what it uses, so both stay smooth. HUD support was contributed by
+[eroobeeroo](https://github.com/eroobeeroo) and [wesleyredhat](https://github.com/wesleyredhat). Photos from a 2021 X5
+xDrive45e (G05); street names blurred.
+
+![The HUD map while driving](docs/hud/hud-on-the-road.jpg)
+
+*The HUD map while driving: the route, the next streets and the speed readout over the road. (The panel at the
+bottom right, battery power and temperatures, is a separate app.)*
+
+| Before: Waze's grey-blue night field on the HUD | After: the background made black, which a HUD shows as nothing |
+|---|---|
+| ![Before](docs/hud/hud-before-black-background.jpg) | ![After](docs/hud/hud-night.jpg) |
+
+- **Size** - a slider in 5 % steps from 30 % to 85 % of the HUD's width, the picture's shape kept. Standard is the
+  fitted box, about 57 %.
+- **Position** - **Move left / right / up / down**, 10 px a press, and **Centre**. The map moves at once and is held
+  inside the HUD.
+- **Made for a HUD** - the frames are scaled on the head unit to the size shown, at most 10 a second, the corners are
+  rounded, and a night map's background is made black so only the roads, route and labels float in view (green,
+  such as parks, is kept).
+- **Gives way** - the map steps aside while the HUD's own media and list pop-ups show, and never replaces BMW's own
+  HUD content.
+- **Turned off after errors** - if the instrument cluster restarts right after the HUD map shows, twice, the HUD map
+  stays off (`HUD map: Disabled after errors`) until the next cluster-render version or `cluster-render guard-reset`;
+  the cluster's map keeps working.
+
+On the cluster the map fills the central area:
+
+![The map on the cluster](docs/hud/cluster-map.jpg)
+
 ## Install
 
 In the Store, add the GitHub source `robertnisipeanu/idrive-apps` and install

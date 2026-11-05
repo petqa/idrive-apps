@@ -152,6 +152,16 @@ struct TargetSpec {
     /* The mapping guard's strikes that disable this mapping; 0: never
      * disabled, the strikes only logged (guard.h). Holds: 2. */
     int strike_limit = 0;
+    /* The stock HMI's pop-up slots the target gives way to (the HUD's media
+     * and list pop-ups, 0x322): while one of them shows content, the target
+     * is released and not asked for, so the pop-up keeps its place (asking
+     * again pushed it from the HUD to the cluster); yield_ms after it goes,
+     * the target is asked for again. */
+    std::vector<uint64_t> yield_slots;
+    int yield_ms = 1500;
+    /* Its layers write from the HUD's share of the upload budget, and its
+     * evidence never moves the upload cap (compositor.h). The HUD's. */
+    bool share = false;
 };
 
 class Guard;
@@ -321,6 +331,8 @@ public:
     /* A hold following the target is disabled by the guard, or by its
      * slot's refusal. */
     bool hold_disabled(int target) const;
+    /* The target's own mapping is disabled (the HUD's, by the guard). */
+    bool disabled(int target) const { return t_[target].disabled; }
     void on_shown(uint64_t scene_id, int64_t now_ms);
     /* Mapped, but parked invisible behind the content the slot shows. */
     void on_parked(uint64_t scene_id, int64_t now_ms);
@@ -423,6 +435,8 @@ private:
         std::vector<std::pair<int64_t, bool>> losses;
         bool given_up = false;
         bool lost_parked = false;       /* a hold: parked again, counted as a loss, since last shown */
+        /* A pop-up in one of its yield slots was last seen shown then. */
+        int64_t popup_ms = -1;
     };
 
     /* The renderers subscribed to one of our scenes since it was published:
@@ -469,6 +483,12 @@ private:
     const SlotInfo *holder_row(int i) const;
     /* The table shows the target's own scene id in its slot. */
     bool named(int i) const;
+    /* A pop-up shows in one of the target's yield slots, or went less than
+     * its yield_ms ago. */
+    bool popup_blocks(int i, int64_t now_ms);
+    /* A shown scene the display removed: evidence for the governor, a
+     * share target's only logged. */
+    void removal_evidence(int i, const std::string &why, int64_t ms);
     void park(int i, int64_t now_ms);
     void charge_resend(int i, int64_t now_ms);
     void take_over(int i, int64_t now_ms);

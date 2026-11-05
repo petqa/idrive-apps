@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+The map on the HUD, contributed by eroobeeroo and wesleyredhat. Show on, a
+drop-down in General, chooses where the map shows: Cluster (the default),
+HUD (experimental) or Cluster and HUD (experimental); with both the HUD uses
+up to half the upload bandwidth, only what it needs. With the map not on
+the cluster, `Cluster map: Off` and the Hide BMW's turn box checkbox is
+greyed. A HUD section: `HUD map: …`, the Size slider (5 %
+a step from 30 % to 85 %) and `Position: …` with Move left, Move right, Move
+up, Move down and Centre, greyed while the HUD is off, and while the
+cluster renderer keeps it off after errors (`HUD map: Disabled after
+errors`). The settings take effect at once and are kept for the next
+start, in a file of their own that waze-on-cluster 0.8 does not read, so
+going back to it keeps working. These rows are in the head unit's display language, as is the rest
+of the page. Requires waze-on-cluster 0.9.0.
+
+The page's sections: General first, then HUD, CarPlay, Android Auto.
+Restart head unit and its Restart row are the page's last rows, so nothing
+above them moves when they show.
+
+CarPlay's section shows `CarPlay Wi-Fi: 5 GHz` or `CarPlay Wi-Fi: 2.4 GHz`
+while CarPlay runs over Wi-Fi and waze-on-cluster knows the band. On 2.4
+GHz a line under it says `Audio may cut out. On your iPhone, turn Wi-Fi off
+and on.` Saved logs include CarPlay's Wi-Fi band, the Wi-Fi interfaces'
+counters and the kernel's Wi-Fi connection lines.
+
 ## 0.5.7
 
 The map's capture starts at boot after the head unit's media bus is up,
